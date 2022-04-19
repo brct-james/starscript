@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use spacedust::client::Client;
 use spacedust::shared;
-// use std::collections::HashMap;
+use std::collections::HashMap;
 // use std::thread;
 // use std::sync::atomic::{AtomicBool, Ordering};
 // use std::sync::Arc;
@@ -18,8 +19,48 @@ use tokio::time::{sleep, Duration};
 // mod captains_log;
 // use crate::captains_log::{CaptainsLog, ShipWithCooldowns};
 
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Stats {
+    surveys: HashMap<String, i64>,
+}
+
+impl Stats {
+    fn new() -> Stats {
+        Stats {
+            surveys: HashMap::new(),
+        }
+    }
+}
+
+fn save_stats(stats: Stats) -> Result<(), Box<dyn std::error::Error>> {
+    let filename = "json/stats.json";
+    let f = std::fs::OpenOptions::new()
+        .truncate(true)
+        .write(true)
+        .create(true)
+        .open(filename)?;
+    // write to file with serde
+    serde_json::to_writer_pretty(f, &stats)?;
+
+    Ok(())
+}
+fn load_stats() -> Result<Stats, std::io::Error> {
+    let filename = "json/stats.json";
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .read(true)
+        .open(filename)?;
+    // serialize json as HashMap
+    match serde_json::from_reader(f) {
+        Ok(stats) => Ok(stats),
+        Err(e) if e.is_eof() => Ok(Stats::new()),
+        Err(e) => panic!("An error occurred: {}", e),
+    }
+}
+
 fn save_agent(ship: shared::AgentInformation) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = "agent.json";
+    let filename = "json/agent.json";
     let f = std::fs::OpenOptions::new()
         .truncate(true)
         .write(true)
@@ -32,7 +73,7 @@ fn save_agent(ship: shared::AgentInformation) -> Result<(), Box<dyn std::error::
 }
 
 fn save_ship(ship: shared::Ship) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = "ship.json";
+    let filename = "json/ship.json";
     let f = std::fs::OpenOptions::new()
         .truncate(true)
         .write(true)
@@ -45,7 +86,7 @@ fn save_ship(ship: shared::Ship) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn save_surveys(surveys: Vec<shared::Survey>) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = "surveys.json";
+    let filename = "json/surveys.json";
     let f = std::fs::OpenOptions::new()
         .truncate(true)
         .write(true)
@@ -58,7 +99,7 @@ fn save_surveys(surveys: Vec<shared::Survey>) -> Result<(), Box<dyn std::error::
 }
 
 fn load_surveys() -> Result<Vec<shared::Survey>, std::io::Error> {
-    let filename = "surveys.json";
+    let filename = "json/surveys.json";
     let f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -107,6 +148,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Define Persistent Vars
     // TODO: Add recovering instead of return Ok(())
     let mut surveys: Vec<shared::Survey> = load_surveys().unwrap();
+    let mut stats: Stats = load_stats().unwrap();
 
     // Collect loop
     loop {
@@ -577,11 +619,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Active Survey is selected from remaining sorted vec
             let active_survey = surveys[0].clone();
+            let key = format!(
+                "{} | {:?} | {}",
+                active_survey.signature, active_survey.deposits, active_survey.expiration
+            );
+            println!("Selected Active Survey {}", key);
             let as_timestamp = DateTime::parse_from_rfc3339(&active_survey.expiration.as_str())
                 .unwrap()
                 .timestamp();
             println!(
-                "Selected Active Survey with timestamp: {} >= {} ? {}",
+                "Active Survey has timestamp: {} >= {} ? {}",
                 as_timestamp,
                 now,
                 as_timestamp >= now
@@ -595,7 +642,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let extraction_results: shared::ExtractData;
             match _client
-                .extract_resources("GREEN-1".to_string(), Some(active_survey))
+                .extract_resources("GREEN-1".to_string(), Some(active_survey.clone()))
                 .await
             {
                 Ok(res) => {
@@ -611,6 +658,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "Extraction Yield: {:#?}",
                 extraction_results.extraction.extract_yield
             );
+            *stats.surveys.entry(key.to_string()).or_insert(0) += 1;
+            if stats.surveys.get(&key).unwrap() >= &12i64 {
+                surveys.remove(0);
+            }
+            save_stats(stats.clone())?;
         } else {
             println!("Error, At Unexpected Location: {}", location);
             return Ok(());
