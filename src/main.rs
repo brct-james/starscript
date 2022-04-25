@@ -85,8 +85,10 @@ fn save_ship(ship: shared::Ship) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn save_surveys(surveys: Vec<shared::Survey>) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = "json/surveys.json";
+fn save_surveys(
+    surveys: Vec<shared::Survey>,
+    filename: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     let f = std::fs::OpenOptions::new()
         .truncate(true)
         .write(true)
@@ -98,8 +100,7 @@ fn save_surveys(surveys: Vec<shared::Survey>) -> Result<(), Box<dyn std::error::
     Ok(())
 }
 
-fn load_surveys() -> Result<Vec<shared::Survey>, std::io::Error> {
-    let filename = "json/surveys.json";
+fn load_surveys(filename: &str) -> Result<Vec<shared::Survey>, std::io::Error> {
     let f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
@@ -111,6 +112,34 @@ fn load_surveys() -> Result<Vec<shared::Survey>, std::io::Error> {
         Err(e) if e.is_eof() => Ok(Vec::<shared::Survey>::new()),
         Err(e) => panic!("An error occurred: {}", e),
     }
+}
+
+fn sort_surveys_by_market_data(
+    surveys: &mut Vec<shared::Survey>,
+    markets: &mut HashMap<String, (String, i64)>,
+) {
+    let good_values: HashMap<String, i64> = markets
+        .iter()
+        .map(|(k, m)| (k.clone(), m.1.clone()))
+        .collect::<HashMap<String, i64>>();
+    let survey_values: HashMap<String, i64> = surveys
+        .iter()
+        .map(|s| {
+            let mut sum = 0i64;
+            for deposit in &s.deposits {
+                match good_values.get(deposit) {
+                    Some(gv) => sum += gv,
+                    None => (),
+                }
+            }
+            return (s.signature.clone(), sum / s.deposits.len() as i64);
+        })
+        .collect::<HashMap<String, i64>>();
+    surveys.sort_by(|a, b| {
+        let a_value = survey_values.get(&a.signature).unwrap();
+        let b_value = survey_values.get(&b.signature).unwrap();
+        return a_value.cmp(b_value).reverse();
+    });
 }
 
 #[tokio::main]
@@ -147,7 +176,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ////////////////////////////////////////////////////////////////////////////
     // Define Persistent Vars
     // TODO: Add recovering instead of return Ok(())
-    let mut surveys: Vec<shared::Survey> = load_surveys().unwrap();
+    let mut surveys: Vec<shared::Survey> = load_surveys("json/surveys.json").unwrap();
     let mut stats: Stats = load_stats().unwrap();
 
     // Collect loop
@@ -182,7 +211,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         save_ship(ship.clone())?;
-        let location = ship.location.as_ref().unwrap();
 
         println!("Getting Travel Cooldown");
         let navigation_cooldown: shared::Navigation;
@@ -206,6 +234,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Handle tasks at location
+        let location = ship.location.as_ref().unwrap();
         if *location == "X1-OE-PM".to_string()
             || *location == "X1-OE-PM01".to_string()
             || *location == "X1-OE-PM02".to_string()
@@ -527,95 +556,184 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 if survey_cooldown.duration > 0 {
-                    if survey_cooldown.duration >= 120 && cargo_used >= 200 {
-                        // Rather than waiting fruitlessly for more surveys, go sell cargo now instead since have over 70%
-                        println!("Survey Cooldown {} >= 120, and Cargo Used {} >= 200, Go Sell Now Rather than Waiting Around", survey_cooldown.duration, cargo_used);
-                        let destination_symbol;
-                        if ship
-                            .cargo
-                            .iter()
-                            .any(|c| c.trade_symbol == "SILICON" || c.trade_symbol == "QUARTZ")
-                        {
-                            // Send to X1-OE-PM
-                            destination_symbol = "X1-OE-PM".to_string();
-                        } else if ship.cargo.iter().any(|c| {
-                            c.trade_symbol == "IRON_ORE"
-                                || c.trade_symbol == "ALUMINUM_ORE"
-                                || c.trade_symbol == "COPPER_ORE"
-                        }) {
-                            // Send to X1-OE-PM01
-                            destination_symbol = "X1-OE-PM01".to_string();
-                        } else if ship.cargo.iter().any(|c| {
-                            c.trade_symbol == "ALUMINUM" || c.trade_symbol == "ELECTRONICS"
-                        }) {
-                            // Send to X1-OE-PM02
-                            destination_symbol = "X1-OE-PM02".to_string();
-                        } else {
-                            // Vent any other cargo as it can't be sold in system then continue to next loop
-                            for good in ship.cargo {
-                                match _client
-                                    .jettison_cargo(
-                                        "GREEN-1".to_string(),
-                                        good.trade_symbol.to_string(),
-                                        good.units,
-                                    )
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        println!(
-                                            "Jettisoned Cargo: {}: {}",
-                                            good.trade_symbol, good.units
-                                        );
-                                    }
-                                    Err(res_err) => {
-                                        println!("err {:?}", res_err);
-                                        return Ok(());
+                    let temp_surveys = load_surveys("json/temp_surveys.json").unwrap();
+                    if temp_surveys.len() == 0 {
+                        // temp surveys not found, continue
+                        println!("Nothing in temp_surveys.json");
+                        if survey_cooldown.duration >= 120 && cargo_used >= 200 {
+                            // Rather than waiting fruitlessly for more surveys, go sell cargo now instead since have over 70%
+                            println!("Survey Cooldown {} >= 120, and Cargo Used {} >= 200, Go Sell Now Rather than Waiting Around", survey_cooldown.duration, cargo_used);
+                            let destination_symbol;
+                            if ship
+                                .cargo
+                                .iter()
+                                .any(|c| c.trade_symbol == "SILICON" || c.trade_symbol == "QUARTZ")
+                            {
+                                // Send to X1-OE-PM
+                                destination_symbol = "X1-OE-PM".to_string();
+                            } else if ship.cargo.iter().any(|c| {
+                                c.trade_symbol == "IRON_ORE"
+                                    || c.trade_symbol == "ALUMINUM_ORE"
+                                    || c.trade_symbol == "COPPER_ORE"
+                            }) {
+                                // Send to X1-OE-PM01
+                                destination_symbol = "X1-OE-PM01".to_string();
+                            } else if ship.cargo.iter().any(|c| {
+                                c.trade_symbol == "ALUMINUM" || c.trade_symbol == "ELECTRONICS"
+                            }) {
+                                // Send to X1-OE-PM02
+                                destination_symbol = "X1-OE-PM02".to_string();
+                            } else {
+                                // Vent any other cargo as it can't be sold in system then continue to next loop
+                                for good in ship.cargo {
+                                    match _client
+                                        .jettison_cargo(
+                                            "GREEN-1".to_string(),
+                                            good.trade_symbol.to_string(),
+                                            good.units,
+                                        )
+                                        .await
+                                    {
+                                        Ok(_) => {
+                                            println!(
+                                                "Jettisoned Cargo: {}: {}",
+                                                good.trade_symbol, good.units
+                                            );
+                                        }
+                                        Err(res_err) => {
+                                            println!("err {:?}", res_err);
+                                            return Ok(());
+                                        }
                                     }
                                 }
+                                continue;
                             }
-                            continue;
+                            let navigate_response: shared::Navigation;
+                            match _client
+                                .navigate_ship(
+                                    "GREEN-1".to_string(),
+                                    destination_symbol.to_string(),
+                                )
+                                .await
+                            {
+                                Ok(res) => {
+                                    println!("Began Travel to {}", destination_symbol.to_string());
+                                    navigate_response = res.data.navigation;
+                                }
+                                Err(res_err) => {
+                                    println!("err {:?}", res_err);
+                                    return Ok(());
+                                }
+                            }
+                            let dur = (navigate_response.duration_remaining.unwrap() * 1000) + 1000;
+                            println!("Waiting {}s for navigation cooldown", dur / 1000);
+                            sleep(Duration::from_millis(dur)).await;
+                            continue; // Go to next loop to refresh ship data
                         }
-                        let navigate_response: shared::Navigation;
-                        match _client
-                            .navigate_ship("GREEN-1".to_string(), destination_symbol.to_string())
-                            .await
-                        {
+                        // Wait till can get survey
+                        let dur = (survey_cooldown.duration * 1000) + 1000;
+                        println!("Waiting {}s for survey cooldown", dur / 1000);
+                        sleep(Duration::from_millis(dur)).await;
+                        // Get new set of surveys
+                        println!("Conducting Survey");
+                        match _client.survey_surroundings("GREEN-1".to_string()).await {
                             Ok(res) => {
-                                println!("Began Travel to {}", destination_symbol.to_string());
-                                navigate_response = res.data.navigation;
+                                println!("Got Surveys");
+                                surveys = res.data.surveys;
                             }
                             Err(res_err) => {
                                 println!("err {:?}", res_err);
                                 return Ok(());
                             }
                         }
-                        let dur = (navigate_response.duration_remaining.unwrap() * 1000) + 1000;
-                        println!("Waiting {}s for navigation cooldown", dur / 1000);
-                        sleep(Duration::from_millis(dur)).await;
-                        continue; // Go to next loop to refresh ship data
+                        // save temp_surveys incase error or crash while sorting
+                        println!("Save temp_surveys.json incase error or crash while sorting");
+                        save_surveys(surveys.clone(), "json/temp_surveys.json").unwrap();
+                    } else {
+                        println!("Recovering from Incomplete Sort Step, Loaded temp_surveys.json");
+                        surveys = temp_surveys;
                     }
-                    // Wait till can get survey
-                    let dur = (survey_cooldown.duration * 1000) + 1000;
-                    println!("Waiting {}s for survey cooldown", dur / 1000);
-                    sleep(Duration::from_millis(dur)).await;
+                } else {
+                    // Get new set of surveys
+                    println!("Conducting Survey");
+                    match _client.survey_surroundings("GREEN-1".to_string()).await {
+                        Ok(res) => {
+                            println!("Got Surveys");
+                            surveys = res.data.surveys;
+                        }
+                        Err(res_err) => {
+                            println!("err {:?}", res_err);
+                            return Ok(());
+                        }
+                    }
                 }
-                // Get new set of surveys
-                println!("Conducting Survey");
-                match _client.survey_surroundings("GREEN-1".to_string()).await {
-                    Ok(res) => {
-                        println!("Got Surveys");
-                        surveys = res.data.surveys;
-                    }
-                    Err(res_err) => {
-                        println!("err {:?}", res_err);
-                        return Ok(());
-                    }
-                }
+
                 // Order surveys vec by value
-                // TODO:
+                // TODO: get market symbols automatically
+                // TODO: select where to sell goods based on best prices (in case some systems have better prices at a certain waypoint for the same good)
+                println!("Getting Market Conditions");
+                let mut markets = HashMap::<String, (String, i64)>::new();
+                let m_symbols: [&str; 3] = ["X1-OE-PM", "X1-OE-PM01", "X1-OE-PM02"];
+                for symb in m_symbols {
+                    let market_string = symb.to_string();
+                    let system_string =
+                        market_string.split("-").collect::<Vec<&str>>()[0..2].join("-");
+                    println!(
+                        "System String: {}, Market String: {}",
+                        system_string, market_string
+                    );
+                    match _client
+                        .get_system_market(system_string, market_string.clone())
+                        .await
+                    {
+                        Ok(res) => {
+                            println!("Got Market {}", &market_string);
+                            for import in res.data.imports {
+                                if markets.contains_key(&import.trade_symbol) {
+                                    // Check if stored price is better than price here
+                                    if markets.get(&import.trade_symbol).unwrap().1 > import.price {
+                                        continue;
+                                    }
+                                }
+                                *markets
+                                    .entry(import.trade_symbol.to_string())
+                                    .or_insert((market_string.clone(), import.price)) =
+                                    (market_string.clone(), import.price);
+                            }
+                        }
+                        Err(res_err) => {
+                            println!("err {:?}", res_err);
+                            return Ok(());
+                        }
+                    }
+                }
+                println!(
+                    "Got Markets: {:#?}",
+                    markets
+                        .iter()
+                        .map(|(g, m)| format!("{}: {} @ {}", g, m.1, m.0))
+                        .collect::<Vec<String>>()
+                );
+                println!(
+                    "Ordering Surveys, starting order: {:#?}",
+                    surveys
+                        .iter()
+                        .map(|s| s.signature.to_string())
+                        .collect::<Vec<String>>()
+                );
+                sort_surveys_by_market_data(&mut surveys, &mut markets);
+                println!(
+                    "Ordered Surveys, new order: {:#?}",
+                    surveys
+                        .iter()
+                        .map(|s| s.signature.to_string())
+                        .collect::<Vec<String>>()
+                );
+                // surveys.sort_by_key(|s| (s.deposits.iter().filter(|&d| *d == best_goods[0]).count(), s.deposits.iter().filter(|&d| *d == best_goods[1]).count(), s.deposits.iter().filter(|&d| *d == best_goods[2]).count(), s.deposits.iter().filter(|&d| *d == best_goods[3]).count()));
             }
             // Save Surveys
-            save_surveys(surveys.clone()).unwrap();
+            save_surveys(surveys.clone(), "json/surveys.json").unwrap();
+            save_surveys(vec![], "json/temp_surveys.json").unwrap();
 
             // Active Survey is selected from remaining sorted vec
             let active_survey = surveys[0].clone();
@@ -649,9 +767,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Got Extraction Results");
                     extraction_results = res.data;
                 }
-                Err(res_err) => {
-                    println!("err {:?}", res_err);
-                    return Ok(());
+                Err(err) => {
+                    println!("err {:?}", err);
+                    surveys.remove(0);
+                    continue;
+                    // return Ok(());
+                    // match err {
+                    //     spacedust::errors::SpaceTradersClientError::JsonParse(serde_json::Error { err }) => {
+                    //         let str_err: dyn std::error::Error = *err.into::<std::error::Error>();
+                    //         println!("Exhausted Error {}", *err.to_string());
+                    //         return Ok(());
+                    //     }
+                    //     _ => {
+                    //         println!("err {:?}", err);
+                    //         return Ok(());
+                    //     }
+                    // }
                 }
             }
             println!(
@@ -659,7 +790,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 extraction_results.extraction.extract_yield
             );
             *stats.surveys.entry(key.to_string()).or_insert(0) += 1;
-            if stats.surveys.get(&key).unwrap() >= &12i64 {
+            if stats.surveys.get(&key).unwrap() >= &20i64 {
                 surveys.remove(0);
             }
             save_stats(stats.clone())?;
