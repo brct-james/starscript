@@ -1,5 +1,5 @@
 use super::captains_log::CaptainsLog;
-use spacedust::client::Client;
+use spacedust::apis::configuration::Configuration;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -7,7 +7,7 @@ use tokio::sync::Mutex;
 pub struct Duty {
     pub class: DutyClass,
     pub command: String,
-    pub client: Client,
+    pub client: Configuration,
     pub state: Arc<Mutex<CaptainsLog>>,
 }
 
@@ -15,7 +15,7 @@ impl Duty {
     pub fn new(
         class: DutyClass,
         command: String,
-        client: Client,
+        client: Configuration,
         state: Arc<Mutex<CaptainsLog>>,
     ) -> Self {
         Duty {
@@ -27,30 +27,31 @@ impl Duty {
     }
 
     pub async fn execute(&self) -> String {
-        let mut data = self.state.lock().await;
+        // let mut data = self.state.lock().await;
 
-        let cur_loc = data.ships[0].ship.location.clone().unwrap();
+        // let cur_loc = data.ships[0].ship.location.clone().unwrap();
+        let cur_loc = "temp";
 
-        let status: String;
+        let status: String = "".into();
 
-        match self
-            .client
-            .navigate_ship("GREEN-1".to_string(), self.command.to_string())
-            .await
-        {
-            Ok(res) => {
-                println!("ok {:#?}", res);
-                data.ships[0].navigation = Some(res.data.navigation.clone());
-                status = format!(
-                    "Success, arrive in: {:#?}",
-                    res.data.navigation.duration_remaining.unwrap()
-                )
-            }
-            Err(res_err) => {
-                println!("err {:?}", res_err);
-                status = "Failure".to_string();
-            }
-        }
+        // match self
+        //     .client
+        //     .navigate_ship("GREEN-1".to_string(), self.command.to_string())
+        //     .await
+        // {
+        //     Ok(res) => {
+        //         println!("ok {:#?}", res);
+        //         data.ships[0].navigation = Some(res.data.navigation.clone());
+        //         status = format!(
+        //             "Success, arrive in: {:#?}",
+        //             res.data.navigation.duration_remaining.unwrap()
+        //         )
+        //     }
+        //     Err(res_err) => {
+        //         println!("err {:?}", res_err);
+        //         status = "Failure".to_string();
+        //     }
+        // }
 
         format!(
             "{:#?}: {:#?} -> {}: {}",

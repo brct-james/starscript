@@ -1,802 +1,460 @@
-use serde::{Deserialize, Serialize};
-use spacedust::client::Client;
-use spacedust::shared;
-use std::collections::HashMap;
+use spacedust::apis::contracts_api::{accept_contract, deliver_contract, fulfill_contract};
+use spacedust::apis::fleet_api::{
+    create_survey, extract_resources, jettison, navigate_ship, refuel_ship,
+};
+use spacedust::apis::{configuration, contracts_api as contracts, fleet_api as fleet};
+use spacedust::models::{
+    DeliverContractRequest, ExtractResourcesRequest, JettisonRequest, NavigateShipRequest,
+    ShipNavStatus,
+};
+// use std::collections::HashMap;
 // use std::thread;
-// use std::sync::atomic::{AtomicBool, Ordering};
-// use std::sync::Arc;
-// use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
-use chrono::prelude::*;
 use tokio::time::{sleep, Duration};
 
-// mod cadets;
-// use crate::cadets::cadet;
+mod cadets;
+use crate::cadets::cadet;
 
-// mod duties;
-// use crate::duties::{Duty, DutyClass};
+mod duties;
+use crate::duties::{Duty, DutyClass};
 
-// mod captains_log;
-// use crate::captains_log::{CaptainsLog, ShipWithCooldowns};
+mod captains_log;
+use crate::captains_log::shiprole::ShipRole;
+use crate::captains_log::CaptainsLog;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Stats {
-    surveys: HashMap<String, i64>,
-}
-
-impl Stats {
-    fn new() -> Stats {
-        Stats {
-            surveys: HashMap::new(),
-        }
-    }
-}
-
-fn save_stats(stats: Stats) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = "json/stats.json";
-    let f = std::fs::OpenOptions::new()
-        .truncate(true)
-        .write(true)
-        .create(true)
-        .open(filename)?;
-    // write to file with serde
-    serde_json::to_writer_pretty(f, &stats)?;
-
-    Ok(())
-}
-fn load_stats() -> Result<Stats, std::io::Error> {
-    let filename = "json/stats.json";
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .read(true)
-        .open(filename)?;
-    // serialize json as HashMap
-    match serde_json::from_reader(f) {
-        Ok(stats) => Ok(stats),
-        Err(e) if e.is_eof() => Ok(Stats::new()),
-        Err(e) => panic!("An error occurred: {}", e),
-    }
-}
-
-fn save_agent(ship: shared::AgentInformation) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = "json/agent.json";
-    let f = std::fs::OpenOptions::new()
-        .truncate(true)
-        .write(true)
-        .create(true)
-        .open(filename)?;
-    // write to file with serde
-    serde_json::to_writer_pretty(f, &ship)?;
-
-    Ok(())
-}
-
-fn save_ship(ship: shared::Ship) -> Result<(), Box<dyn std::error::Error>> {
-    let filename = "json/ship.json";
-    let f = std::fs::OpenOptions::new()
-        .truncate(true)
-        .write(true)
-        .create(true)
-        .open(filename)?;
-    // write to file with serde
-    serde_json::to_writer_pretty(f, &ship)?;
-
-    Ok(())
-}
-
-fn save_surveys(
-    surveys: Vec<shared::Survey>,
-    filename: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let f = std::fs::OpenOptions::new()
-        .truncate(true)
-        .write(true)
-        .create(true)
-        .open(filename)?;
-    // write to file with serde
-    serde_json::to_writer_pretty(f, &surveys)?;
-
-    Ok(())
-}
-
-fn load_surveys(filename: &str) -> Result<Vec<shared::Survey>, std::io::Error> {
-    let f = std::fs::OpenOptions::new()
-        .write(true)
-        .create(true)
-        .read(true)
-        .open(filename)?;
-    // serialize json as HashMap
-    match serde_json::from_reader(f) {
-        Ok(surveys) => Ok(surveys),
-        Err(e) if e.is_eof() => Ok(Vec::<shared::Survey>::new()),
-        Err(e) => panic!("An error occurred: {}", e),
-    }
-}
-
-fn sort_surveys_by_market_data(
-    surveys: &mut Vec<shared::Survey>,
-    markets: &mut HashMap<String, (String, i64)>,
-) {
-    let good_values: HashMap<String, i64> = markets
-        .iter()
-        .map(|(k, m)| (k.clone(), m.1.clone()))
-        .collect::<HashMap<String, i64>>();
-    let survey_values: HashMap<String, i64> = surveys
-        .iter()
-        .map(|s| {
-            let mut sum = 0i64;
-            for deposit in &s.deposits {
-                match good_values.get(deposit) {
-                    Some(gv) => sum += gv,
-                    None => (),
-                }
-            }
-            return (s.signature.clone(), sum / s.deposits.len() as i64);
-        })
-        .collect::<HashMap<String, i64>>();
-    surveys.sort_by(|a, b| {
-        let a_value = survey_values.get(&a.signature).unwrap();
-        let b_value = survey_values.get(&b.signature).unwrap();
-        return a_value.cmp(b_value).reverse();
-    });
-}
+mod astronomicon;
+use crate::astronomicon::Astronomicon;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init();
 
-    // Setup Game Client
-    let http_client = spacedust::client::get_http_client(None);
-
-    // // Register agent
-    // let claim_agent_response = spacedust::client::claim_agent(
-    //     http_client,
-    //     "https://v2-0-0.alpha.spacetraders.io".to_string(),
-    //     "<4-8 character string>".to_string(),
-    //     "COMMERCE_REPUBLIC".to_string(),
-    // )
-    // .await.unwrap();
-
-    // // Setup client using claimed agent
-    // let client = Client::new(
-    //     http_client,
-    //     "https://v2-0-0.alpha.spacetraders.io".to_string(),
-    //     claim_agent_response.data.agent.symbol,
-    //     claim_agent_response.token,
-    // );
-
-    let _client = Client::new(
-        http_client,
-        "https://v2-0-0.alpha.spacetraders.io".to_string(),
-        "GREEN".to_string(),
-        "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZGVudGlmaWVyIjoiR1JFRU4iLCJpYXQiOjE2NDcwMTY1NjMsInN1YiI6ImFnZW50LXRva2VuIn0.S-9AfG_asd21tsdGf9TF-cwML32x-TFd-b2n9WT21CKA3gkS9qhR15Zng9I2chv92NRriUGUDVb3flc-nZfnbDrMK_iBUbHT7oLiUu1X4Rr9HumsHUdSEltpVGxTvRm6-0udRgLuy9ndoXCxomUsTruszqdRZ5BJb9-2OYcP_kU6FnYcERDGoKNn6jISmPCaSnSs8nCDw5dbSrDF16mAJiGozJlx9j1gDUHWzeQZF7k4fonPxcLPGQjSa4mKIMaYYCh5oATW3wMh5qnXb-iz-wiwHZ7aXd1jkmDVQzeFXYqLpNf1jjQOXXdqEcZ_lFe79Mgeg1vuNtJDZpPNh-KC7P7YdC_F-7DYA82x6uYDPN8bwxcPd5uNmw0lZr5_C0lUI_z8-igPurxDBLizwjBdMdjIaqY2YSjEV_zocRy-I-N_0c43Dc9a5zZoFFH0DPwFrR2c9pp3tSkFsRMHp86SVlASIDXCQlgLvlNoDORi79dVR9ap64JgK3z-ttoJ_v90".to_string(),
-    );
+    // Setup Configuration
+    let mut client = configuration::Configuration::new();
+    client.bearer_access_token = Some(String::from("eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZGVudGlmaWVyIjoiVklSSURJUyIsImlhdCI6MTY3MDY5MDY2Niwic3ViIjoiYWdlbnQtdG9rZW4ifQ.A42hIDXm2UV3VJGX8juWXUgXt3yU_x23VoPiZfJJapN4ogEjz9dEK9njzYI2FDIvQx6CliX7RHNbzkE1R98LBOjzkH-9eHPd_MkqLtu4-58n7YKNTaelzTRSCeIz4W-cnqwdUSvQCs8F4yzTt7UOCuJSJErY242xtGjVv72RdHY7prPU09PY79q0dwJ_utEi7Mu-CF96qGfD6sJ9gy8YXeiuNb4Kcm03H7QnqalFeZ-dCfxHQRWInzSv6OQrDjqXNUnhQLnWAxm0oqZTc0YbFNBoKsiVMOf8Qv-5Dw4rTB5GYkL81lLDyxKA9ijt2Lw_jhXB97xeCOnA7kud-mTcLXHaB_xVGTFdcyT-hDkjWMgEL1dQQmHcyRvBjenXrfGqNribVN0qdwyPwdgs9SU7u3BSFEvmI5gvJPcbI8TF6C8QXuIwHW6BjB_ELL6ZDFSBmbBnCp-55ILONbjKScBk4cV3cyCixPvVFJFGL_0padXvRM_nXgCuQcANLdH495Gh"));
 
     ////////////////////////////////////////////////////////////////////////////
-    // Define Persistent Vars
-    // TODO: Add recovering instead of return Ok(())
-    let mut surveys: Vec<shared::Survey> = load_surveys("json/surveys.json").unwrap();
-    let mut stats: Stats = load_stats().unwrap();
 
-    // Collect loop
+    // let (cmd_tx, cmd_rx) = tokio::sync::watch::channel("run".to_string());
+    // let (duty_tx, duty_rx) = flume::bounded(32);
+    // println!("Spawn");
+    // let drx = duty_rx.clone();
+    // let crx = cmd_rx.clone();
+    // tokio::spawn(async move { cadet(drx, crx, "Redshirt".to_string()).await });
+
+    // // Sleep to allow the tokio processes to spawn
+    // sleep(Duration::from_millis(1000)).await;
+
+    // Setup ctrl-c handling
+    let quit = Arc::new(AtomicBool::new(false));
+    let q = quit.clone();
+    ctrlc::set_handler(move || {
+        q.store(true, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
+    // Get Ship
+    let ship = fleet::get_my_ship(&client, "VIRIDIS-1").await.unwrap().data;
+
+    // Initialize captains log
+    let cl = Arc::new(Mutex::new(CaptainsLog::new()));
+    let mut locked_cl = cl.lock().await;
+    locked_cl.upsert_ship(ship);
+
+    // Initialize astronomicon
+    // TODO: generate from game query
+    let astr = Arc::new(Mutex::new(Astronomicon::new()));
+    let mut locked_astr = astr.lock().await;
+    // locked_cl.waypoints.push();
+
+    // Send duties to the cadets
+    println!("Start Loop");
     loop {
-        println!("--Starting Loop--");
-        // Get Agent
-        println!("Getting Agent");
-        let agent: shared::AgentInformation;
-        match _client.get_my_agent_details().await {
-            Ok(res) => {
-                println!("Got Agent");
-                agent = res.data;
-            }
-            Err(res_err) => {
-                println!("err {:?}", res_err);
-                return Ok(());
-            }
-        }
-        save_agent(agent.clone())?;
-
-        // Get Ship
-        println!("Getting Ship");
-        let mut ship: shared::Ship;
-        match _client.get_my_ship("GREEN-1".to_string()).await {
-            Ok(res) => {
-                println!("Got Ship, Located At: {:?}", res.data.location);
-                ship = res.data;
-            }
-            Err(res_err) => {
-                println!("err {:?}", res_err);
-                return Ok(());
-            }
-        }
-        save_ship(ship.clone())?;
-
-        println!("Getting Travel Cooldown");
-        let navigation_cooldown: shared::Navigation;
-        match _client.ship_navigation_status("GREEN-1".to_string()).await {
-            Ok(res) => {
-                println!("Got Travel Cooldown");
-                navigation_cooldown = res.data.navigation;
-            }
-            Err(res_err) => {
-                println!("err {:?}", res_err);
-                return Ok(());
-            }
+        println!("------- At Beginning of Loop -------");
+        // CHECK IF NEED TO QUIT AND IF SO GRACEFULLY SHUTDOWN
+        if quit.load(Ordering::SeqCst) {
+            // cmd_tx.send("shutdown".to_string()).unwrap();
+            // // Sleep to allow the processes to gracefully shutdown before killing process
+            // // TODO: Use a channel to confirm shutdown instead
+            // sleep(Duration::from_millis(5000)).await;
+            break;
         }
 
-        // Wait for travel to complete if traveling
-        if navigation_cooldown.arrived_at.is_none() {
-            let dur = (navigation_cooldown.duration_remaining.unwrap() * 1000) + 1000;
-            println!("Waiting {}s for navigation cooldown", dur / 1000);
-            sleep(Duration::from_millis(dur)).await;
-            continue; // Go to next loop to refresh ship data
-        }
+        // Update fleet
+        println!("Update Fleet");
+        locked_cl.upsert_fleet(fleet::get_my_ships(&client).await.unwrap().data);
 
-        // Handle tasks at location
-        let location = ship.location.as_ref().unwrap();
-        if *location == "X1-OE-PM".to_string()
-            || *location == "X1-OE-PM01".to_string()
-            || *location == "X1-OE-PM02".to_string()
-        {
-            println!("At Port, Docking");
-            // Dock
-            match _client.dock_ship("GREEN-1".to_string()).await {
-                Ok(_) => {
-                    println!("Docked");
-                }
-                Err(res_err) => {
-                    println!("err {:?}", res_err);
-                    // return Ok(()); // Ignore error here, incase double dock due to restart or something
-                }
-            }
+        // Update contracts
+        println!("Update Contracts");
+        let my_contracts = contracts::get_contracts(&client).await.unwrap().data;
+        let mut active_contract: Option<spacedust::models::Contract> = None;
 
-            // Sell Imported Cargo
-            let market_imports: Vec<String>;
-            match ship.location.as_ref().unwrap().as_str() {
-                "X1-OE-PM" => market_imports = vec!["SILICON".to_string(), "QUARTZ".to_string()],
-                "X1-OE-PM01" => {
-                    market_imports = vec![
-                        "IRON_ORE".to_string(),
-                        "ALUMINUM_ORE".to_string(),
-                        "COPPER_ORE".to_string(),
-                    ]
-                }
-                "X1-OE-PM02" => {
-                    market_imports = vec!["ALUMINUM".to_string(), "ELECTRONICS".to_string()]
-                }
-                _ => {
-                    println!(
-                        "Error, unexpected location: {:#?}",
-                        ship.location.as_ref().unwrap()
-                    );
-                    return Ok(());
-                }
-            }
-            let mut txs: Vec<String> = vec![];
-            for good in &ship.cargo {
-                for import_good in &market_imports {
-                    if good.trade_symbol.to_string() == *import_good {
-                        // Sell
-                        println!("Selling Good {}", import_good);
-                        match _client
-                            .sell_cargo(
-                                "GREEN-1".to_string(),
-                                good.trade_symbol.to_string(),
-                                good.units,
-                            )
-                            .await
-                        {
-                            Ok(res) => {
-                                println!(
-                                    "Sold {} units of {} for {} total credits",
-                                    res.data.units, res.data.trade_symbol, res.data.credits
-                                );
-                            }
-                            Err(res_err) => {
-                                println!("err {:?}", res_err);
-                                return Ok(());
-                            }
-                        }
-                        // Add to TX list
-                        txs.push(good.trade_symbol.to_string());
-                    }
-                }
-            }
-
-            // Remove TX'd goods from cargo
-            for tx in txs {
-                let index = ship
-                    .cargo
-                    .iter()
-                    .position(|g| g.trade_symbol == tx)
+        // Accept Any That Haven't Been Accepted, Try Fulfill if Possible, Set an Active Contract
+        for contract in my_contracts {
+            if contract.accepted == false {
+                accept_contract(&client, contract.id.as_str())
+                    .await
                     .unwrap();
-                ship.cargo.remove(index);
+            } else if contract.fulfilled == false {
+                let mut all_delivered = true;
+                for delivery_term in contract.terms.deliver.clone().unwrap() {
+                    if delivery_term.units_fulfilled < delivery_term.units_required {
+                        all_delivered = false;
+                        active_contract = Some(contract.clone());
+                    }
+                }
+                if all_delivered {
+                    fulfill_contract(&client, contract.id.as_str())
+                        .await
+                        .unwrap();
+                }
+            }
+        }
+
+        let mut active_contract_delivery_items: Vec<String> = Default::default();
+        match active_contract {
+            Some(ac) => {
+                for item in ac.terms.deliver.unwrap() {
+                    if item.units_fulfilled < item.units_required {
+                        active_contract_delivery_items.push(item.trade_symbol);
+                    }
+                }
+            }
+            None => (),
+        }
+
+        locked_cl.upsert_ledger_contracts(contracts::get_contracts(&client).await.unwrap().data);
+
+        for (symbol, ship) in locked_cl.ships.clone() {
+            // If ship is unassigned, assign a role
+            // TODO: Make this more intelligent, using some kind of global configuration to orchestrate goals broadly and the system will handle the logistics (e.g. 'complete this contract' and will send ships to mine and/or buy and turn in)
+            if ship.role == ShipRole::Unassigned {
+                println!("Assigning Ship {} Role::Miner", ship.ship.symbol);
+                locked_cl.update_ship_role(&symbol, ShipRole::Miner);
+                continue;
             }
 
-            // Refuel if necessary
-            if ship.fuel <= 100 {
-                // Buy Fuel
-                match _client.refuel_ship("GREEN-1".to_string()).await {
-                    Ok(_) => {
-                        println!("Refueled");
-                    }
-                    Err(res_err) => {
-                        println!("err {:?}", res_err);
-                        return Ok(());
-                    }
-                }
+            // If in transit, skip
+            if ship.ship.nav.status == ShipNavStatus::InTransit {
+                println!("Ship {} in transit, skipping", ship.ship.symbol);
+                continue;
             }
 
-            println!("Business Concluded, Moving to Orbit");
-            // Orbit
-            match _client.orbit_ship("GREEN-1".to_string()).await {
-                Ok(_) => {
-                    println!("Orbited");
-                }
-                Err(res_err) => {
-                    println!("err {:?}", res_err);
-                    // return Ok(()); // Ignore error here, incase double dock due to restart or something
-                }
-            }
+            // TODO: Make cadet handle this logic internally based on role
+            // E.g. if global config says priority is finishing a contract, based on the configured max distance for contract delivery ships will decide whether to sell their goods, or deliver.
 
-            // If Cargo Still Contains Sellable Goods, Continue to Next Location
-            if ship.cargo.len() > 0 {
-                println!(
-                    "Cargo Still Contains Sellable Goods {:#?}, Continuing to Next Location",
-                    ship.cargo
-                        .iter()
-                        .map(|g| format!("{}: {}, ", g.trade_symbol, g.units))
-                        .collect::<String>()
-                );
-                let destination_symbol;
-                if ship
-                    .cargo
-                    .iter()
-                    .any(|c| c.trade_symbol == "SILICON" || c.trade_symbol == "QUARTZ")
-                {
-                    // Send to X1-OE-PM
-                    destination_symbol = "X1-OE-PM".to_string();
-                } else if ship.cargo.iter().any(|c| {
-                    c.trade_symbol == "IRON_ORE"
-                        || c.trade_symbol == "ALUMINUM_ORE"
-                        || c.trade_symbol == "COPPER_ORE"
-                }) {
-                    // Send to X1-OE-PM01
-                    destination_symbol = "X1-OE-PM01".to_string();
-                } else if ship
-                    .cargo
-                    .iter()
-                    .any(|c| c.trade_symbol == "ALUMINUM" || c.trade_symbol == "ELECTRONICS")
-                {
-                    // Send to X1-OE-PM02
-                    destination_symbol = "X1-OE-PM02".to_string();
-                } else {
-                    // Vent any other cargo as it can't be sold in system then continue to next loop
-                    for good in ship.cargo {
-                        match _client
-                            .jettison_cargo(
-                                "GREEN-1".to_string(),
-                                good.trade_symbol.to_string(),
-                                good.units,
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                println!("Jettisoned Cargo: {}: {}", good.trade_symbol, good.units);
-                            }
-                            Err(res_err) => {
-                                println!("err {:?}", res_err);
-                                return Ok(());
-                            }
-                        }
-                    }
-                    continue;
-                }
-                println!("Destination: {}", destination_symbol);
-                let navigate_response: shared::Navigation;
-                match _client
-                    .navigate_ship("GREEN-1".to_string(), destination_symbol.to_string())
-                    .await
-                {
-                    Ok(res) => {
-                        println!("Began Travel to {}", destination_symbol.to_string());
-                        navigate_response = res.data.navigation;
-                    }
-                    Err(res_err) => {
-                        println!("err {:?}", res_err);
-                        return Ok(());
-                    }
-                }
-                let dur = (navigate_response.duration_remaining.unwrap() * 1000) + 1000;
-                println!("Waiting {}s for navigation cooldown", dur / 1000);
-                sleep(Duration::from_millis(dur)).await;
-                continue; // Go to next loop to refresh ship data
-            }
-
-            // If Cargo Emptied, Go Back to Harvest More
-            if ship.cargo.len() == 0 {
-                println!("Cargo Empty, Go Harvest");
-                let destination_symbol = "X1-OE-A005".to_string();
-                let navigate_response: shared::Navigation;
-                match _client
-                    .navigate_ship("GREEN-1".to_string(), destination_symbol.to_string())
-                    .await
-                {
-                    Ok(res) => {
-                        println!("Began Travel to {}", destination_symbol.to_string());
-                        navigate_response = res.data.navigation;
-                    }
-                    Err(res_err) => {
-                        println!("err {:?}", res_err);
-                        return Ok(());
-                    }
-                }
-                let dur = (navigate_response.duration_remaining.unwrap() * 1000) + 1000;
-                println!("Waiting {}s for navigation cooldown", dur / 1000);
-                sleep(Duration::from_millis(dur)).await;
-                continue; // Go to next loop to refresh ship data
-            }
-        } else if *location == "X1-OE-A005".to_string() {
-            println!("At Asteroid Field");
-            // If Cargo Full or Nearly Full, Go Sell
-            let cargo_used = ship.cargo.iter().map(|g| g.units).sum::<i64>();
-            println!("Cargo Used: {} of {}", cargo_used, ship.stats.cargo_limit);
-            if cargo_used + 10 >= ship.stats.cargo_limit.into() {
-                println!("Cargo Full or Nearly Full, Go Sell");
-                let destination_symbol;
-                if ship
-                    .cargo
-                    .iter()
-                    .any(|c| c.trade_symbol == "SILICON" || c.trade_symbol == "QUARTZ")
-                {
-                    // Send to X1-OE-PM
-                    destination_symbol = "X1-OE-PM".to_string();
-                } else if ship.cargo.iter().any(|c| {
-                    c.trade_symbol == "IRON_ORE"
-                        || c.trade_symbol == "ALUMINUM_ORE"
-                        || c.trade_symbol == "COPPER_ORE"
-                }) {
-                    // Send to X1-OE-PM01
-                    destination_symbol = "X1-OE-PM01".to_string();
-                } else if ship
-                    .cargo
-                    .iter()
-                    .any(|c| c.trade_symbol == "ALUMINUM" || c.trade_symbol == "ELECTRONICS")
-                {
-                    // Send to X1-OE-PM02
-                    destination_symbol = "X1-OE-PM02".to_string();
-                } else {
-                    // Vent any other cargo as it can't be sold in system then continue to next loop
-                    for good in ship.cargo {
-                        match _client
-                            .jettison_cargo(
-                                "GREEN-1".to_string(),
-                                good.trade_symbol.to_string(),
-                                good.units,
-                            )
-                            .await
-                        {
-                            Ok(_) => {
-                                println!("Jettisoned Cargo: {}: {}", good.trade_symbol, good.units);
-                            }
-                            Err(res_err) => {
-                                println!("err {:?}", res_err);
-                                return Ok(());
-                            }
-                        }
-                    }
-                    continue;
-                }
-                let navigate_response: shared::Navigation;
-                match _client
-                    .navigate_ship("GREEN-1".to_string(), destination_symbol.to_string())
-                    .await
-                {
-                    Ok(res) => {
-                        println!("Began Travel to {}", destination_symbol.to_string());
-                        navigate_response = res.data.navigation;
-                    }
-                    Err(res_err) => {
-                        println!("err {:?}", res_err);
-                        return Ok(());
-                    }
-                }
-                let dur = (navigate_response.duration_remaining.unwrap() * 1000) + 1000;
-                println!("Waiting {}s for navigation cooldown", dur / 1000);
-                sleep(Duration::from_millis(dur)).await;
-                continue; // Go to next loop to refresh ship data
-            }
-
-            // Check Extract Cooldown first to prevent stale active_survey after waiting on extract_cooldown
-            println!("Getting Extract Cooldown");
-            let extract_cooldown: shared::Cooldown;
-            match _client.get_extract_cooldown("GREEN-1".to_string()).await {
-                Ok(res) => {
-                    println!("Got Extract Cooldown");
-                    extract_cooldown = res.data.cooldown;
-                }
-                Err(res_err) => {
-                    println!("err {:?}", res_err);
-                    return Ok(());
-                }
-            }
-
-            // If On Cooldown, Wait
-            if extract_cooldown.duration > 0 {
-                // Wait till can get survey
-                let dur = (extract_cooldown.duration * 1000) + 1000;
-                println!("Waiting {}s for extract cooldown", dur / 1000);
-                sleep(Duration::from_millis(dur)).await;
-            }
-
-            println!("Remove Expired Surveys");
-            // Remove expired surveys from list
-            let now = Utc::now().timestamp() + 5; // Buffer 5s to try and prevent errors
-            surveys.retain(|s| {
-                DateTime::parse_from_rfc3339(&s.expiration.as_str())
-                    .unwrap()
-                    .timestamp()
-                    >= now
-            });
-            // If no surveys remain, attempt to get more
-            if surveys.len() == 0 {
-                println!("No Surveys Remain, Need to Re-Survey");
-                // Check survey cooldown
-                println!("Getting Survey Cooldown");
-                let survey_cooldown: shared::Cooldown;
-                match _client.get_survey_cooldown("GREEN-1".to_string()).await {
-                    Ok(res) => {
-                        println!("Got Survey Cooldown");
-                        survey_cooldown = res.data.cooldown;
-                    }
-                    Err(res_err) => {
-                        println!("err {:?}", res_err);
-                        return Ok(());
-                    }
-                }
-                if survey_cooldown.duration > 0 {
-                    let temp_surveys = load_surveys("json/temp_surveys.json").unwrap();
-                    if temp_surveys.len() == 0 {
-                        // temp surveys not found, continue
-                        println!("Nothing in temp_surveys.json");
-                        if survey_cooldown.duration >= 120 && cargo_used >= 200 {
-                            // Rather than waiting fruitlessly for more surveys, go sell cargo now instead since have over 70%
-                            println!("Survey Cooldown {} >= 120, and Cargo Used {} >= 200, Go Sell Now Rather than Waiting Around", survey_cooldown.duration, cargo_used);
-                            let destination_symbol;
-                            if ship
-                                .cargo
-                                .iter()
-                                .any(|c| c.trade_symbol == "SILICON" || c.trade_symbol == "QUARTZ")
-                            {
-                                // Send to X1-OE-PM
-                                destination_symbol = "X1-OE-PM".to_string();
-                            } else if ship.cargo.iter().any(|c| {
-                                c.trade_symbol == "IRON_ORE"
-                                    || c.trade_symbol == "ALUMINUM_ORE"
-                                    || c.trade_symbol == "COPPER_ORE"
-                            }) {
-                                // Send to X1-OE-PM01
-                                destination_symbol = "X1-OE-PM01".to_string();
-                            } else if ship.cargo.iter().any(|c| {
-                                c.trade_symbol == "ALUMINUM" || c.trade_symbol == "ELECTRONICS"
-                            }) {
-                                // Send to X1-OE-PM02
-                                destination_symbol = "X1-OE-PM02".to_string();
-                            } else {
-                                // Vent any other cargo as it can't be sold in system then continue to next loop
-                                for good in ship.cargo {
-                                    match _client
-                                        .jettison_cargo(
-                                            "GREEN-1".to_string(),
-                                            good.trade_symbol.to_string(),
-                                            good.units,
-                                        )
-                                        .await
-                                    {
-                                        Ok(_) => {
-                                            println!(
-                                                "Jettisoned Cargo: {}: {}",
-                                                good.trade_symbol, good.units
-                                            );
-                                        }
-                                        Err(res_err) => {
-                                            println!("err {:?}", res_err);
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-                            let navigate_response: shared::Navigation;
-                            match _client
-                                .navigate_ship(
-                                    "GREEN-1".to_string(),
-                                    destination_symbol.to_string(),
+            // TEMP: If miner, conduct mining
+            let mining_waypoint = "X1-YR6-17535B";
+            let deliver_waypoint = "X1-YR6-27710Z".to_string();
+            if ship.role == ShipRole::Miner {
+                println!("Ship {} is miner", ship.ship.symbol);
+                if ship.ship.nav.waypoint_symbol == mining_waypoint {
+                    println!("Ship {} at mining site", ship.ship.symbol);
+                    // IF AT MINING SITE
+                    if ship.ship.cargo.units >= ship.ship.cargo.capacity - 4 {
+                        println!("Ship {} nearly full", ship.ship.symbol);
+                        // IF CARGO WITHIN 4 UNITS OF FULL
+                        // GO DELIVER OR SELL
+                        // TODO: Sell logic
+                        let mut did_jettison = false;
+                        for item in ship.ship.cargo.inventory {
+                            if active_contract_delivery_items.contains(&item.symbol) {
+                                println!(
+                                    "Ship {} has cargo to jettison: {} {}",
+                                    ship.ship.symbol, item.units, item.symbol
+                                );
+                                did_jettison = true;
+                                jettison(
+                                    &client,
+                                    ship.ship.symbol.as_str(),
+                                    Some(JettisonRequest {
+                                        symbol: item.symbol,
+                                        units: item.units,
+                                    }),
                                 )
                                 .await
-                            {
-                                Ok(res) => {
-                                    println!("Began Travel to {}", destination_symbol.to_string());
-                                    navigate_response = res.data.navigation;
-                                }
-                                Err(res_err) => {
-                                    println!("err {:?}", res_err);
-                                    return Ok(());
-                                }
-                            }
-                            let dur = (navigate_response.duration_remaining.unwrap() * 1000) + 1000;
-                            println!("Waiting {}s for navigation cooldown", dur / 1000);
-                            sleep(Duration::from_millis(dur)).await;
-                            continue; // Go to next loop to refresh ship data
-                        }
-                        // Wait till can get survey
-                        let dur = (survey_cooldown.duration * 1000) + 1000;
-                        println!("Waiting {}s for survey cooldown", dur / 1000);
-                        sleep(Duration::from_millis(dur)).await;
-                        // Get new set of surveys
-                        println!("Conducting Survey");
-                        match _client.survey_surroundings("GREEN-1".to_string()).await {
-                            Ok(res) => {
-                                println!("Got Surveys");
-                                surveys = res.data.surveys;
-                            }
-                            Err(res_err) => {
-                                println!("err {:?}", res_err);
-                                return Ok(());
+                                .unwrap();
                             }
                         }
-                        // save temp_surveys incase error or crash while sorting
-                        println!("Save temp_surveys.json incase error or crash while sorting");
-                        save_surveys(surveys.clone(), "json/temp_surveys.json").unwrap();
-                    } else {
-                        println!("Recovering from Incomplete Sort Step, Loaded temp_surveys.json");
-                        surveys = temp_surveys;
-                    }
-                } else {
-                    // Get new set of surveys
-                    println!("Conducting Survey");
-                    match _client.survey_surroundings("GREEN-1".to_string()).await {
-                        Ok(res) => {
-                            println!("Got Surveys");
-                            surveys = res.data.surveys;
+                        if !did_jettison {
+                            println!(
+                                "Ship {} didn't jettison, navigate to deliver waypoint",
+                                ship.ship.symbol
+                            );
+                            navigate_ship(
+                                &client,
+                                ship.ship.symbol.as_str(),
+                                Some(NavigateShipRequest {
+                                    waypoint_symbol: deliver_waypoint,
+                                }),
+                            )
+                            .await
+                            .unwrap();
                         }
-                        Err(res_err) => {
-                            println!("err {:?}", res_err);
-                            return Ok(());
-                        }
-                    }
-                }
+                    } else if locked_cl.ledger.survey_data.contains_key(mining_waypoint) {
+                        // IF CARGO NOT FULL AND SURVEYS WERE AT ONE POINT ACTIVE FOR WAYPOINT
+                        println!(
+                            "Ship {} not full filtering most_recent_surveys",
+                            ship.ship.symbol
+                        );
+                        // Filter expired surveys out of most_recent_surveys
+                        locked_cl
+                            .ledger
+                            .survey_data
+                            .get_mut(mining_waypoint)
+                            .unwrap()
+                            .most_recent_surveys = locked_cl
+                            .ledger
+                            .survey_data
+                            .get(mining_waypoint)
+                            .unwrap()
+                            .most_recent_surveys
+                            .clone()
+                            .into_iter()
+                            .filter(|surv| {
+                                chrono::DateTime::parse_from_rfc3339(surv.expiration.as_str())
+                                    .unwrap()
+                                    > chrono::Utc::now()
+                            })
+                            .collect();
 
-                // Order surveys vec by value
-                // TODO: get market symbols automatically
-                // TODO: select where to sell goods based on best prices (in case some systems have better prices at a certain waypoint for the same good)
-                println!("Getting Market Conditions");
-                let mut markets = HashMap::<String, (String, i64)>::new();
-                let m_symbols: [&str; 3] = ["X1-OE-PM", "X1-OE-PM01", "X1-OE-PM02"];
-                for symb in m_symbols {
-                    let market_string = symb.to_string();
-                    let system_string =
-                        market_string.split("-").collect::<Vec<&str>>()[0..2].join("-");
-                    println!(
-                        "System String: {}, Market String: {}",
-                        system_string, market_string
-                    );
-                    match _client
-                        .get_system_market(system_string, market_string.clone())
-                        .await
-                    {
-                        Ok(res) => {
-                            println!("Got Market {}", &market_string);
-                            for import in res.data.imports {
-                                if markets.contains_key(&import.trade_symbol) {
-                                    // Check if stored price is better than price here
-                                    if markets.get(&import.trade_symbol).unwrap().1 > import.price {
+                        if locked_cl.ledger.survey_data[mining_waypoint]
+                            .most_recent_surveys
+                            .len()
+                            > 0
+                        {
+                            // IF ACTIVE SURVEYS
+                            println!("Ship {} has active surveys, mining", ship.ship.symbol);
+                            // MINE WITH SURVEY
+                            let target_survey = locked_cl.ledger.survey_data[mining_waypoint]
+                                .most_recent_surveys[0]
+                                .clone();
+                            extract_resources(
+                                &client,
+                                ship.ship.symbol.as_str(),
+                                Some(ExtractResourcesRequest {
+                                    survey: Some(Box::new(target_survey)),
+                                }),
+                            )
+                            .await
+                            .unwrap();
+                            continue;
+                        } else {
+                            // IF NO ACTIVE SURVEYS
+                            println!("Ship {} no active surveys", ship.ship.symbol);
+                            if ship.ship.cargo.units as f64 / ship.ship.cargo.capacity as f64 > 0.90
+                                || ship.ship.cargo.capacity - ship.ship.cargo.units < 20
+                            {
+                                // IF CARGO NEARLY FULL
+                                println!(
+                                    "Ship {} cargo nearly full, mine without survey",
+                                    ship.ship.symbol
+                                );
+                                // MINE WITHOUT SURVEY
+                                // If ship at least 90% full or less than 20 units remaining just mine without survey
+                                extract_resources(&client, ship.ship.symbol.as_str(), None)
+                                    .await
+                                    .unwrap();
+                                continue;
+                            } else {
+                                // IF CARGO NOT NEARLY FULL
+                                println!("Ship {} try survey", ship.ship.symbol);
+                                // TRY SURVEY
+                                let survey_result =
+                                    create_survey(&client, ship.ship.symbol.as_str()).await;
+                                match survey_result {
+                                    Ok(survey_response) => {
+                                        // IF SURVEY SUCCESS
+                                        println!("Ship {} survey success", ship.ship.symbol);
+                                        // STORE RESULTS
+                                        let surveys = survey_response.data.surveys;
+                                        locked_cl
+                                            .ledger
+                                            .survey_data
+                                            .get_mut(mining_waypoint)
+                                            .unwrap()
+                                            .insert(surveys);
+                                        // SORT RESULTS
+                                        println!("Ship {} sorting survey", ship.ship.symbol);
+                                        // TODO: GET MARKETS FROM ASTRONOMICON
+                                        // locked_cl.ledger.survey_data.get(mining_waypoint).unwrap().sort_surveys_by_market_data(markets);
+                                        locked_cl
+                                            .ledger
+                                            .survey_data
+                                            .get_mut(mining_waypoint)
+                                            .unwrap()
+                                            .sort_surveys_for_items(
+                                                &active_contract_delivery_items,
+                                            );
+                                        // MINE WITH SURVEY
+                                        println!("Ship {} mining with survey", ship.ship.symbol);
+                                        let target_survey = locked_cl.ledger.survey_data
+                                            [mining_waypoint]
+                                            .most_recent_surveys[0]
+                                            .clone();
+                                        extract_resources(
+                                            &client,
+                                            ship.ship.symbol.as_str(),
+                                            Some(ExtractResourcesRequest {
+                                                survey: Some(Box::new(target_survey)),
+                                            }),
+                                        )
+                                        .await
+                                        .unwrap();
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        // IF SURVEY FAILURE
+                                        println!("Ship {} survey on cooldown", ship.ship.symbol);
+                                        // STORE COOLDOWN
+                                        // TODO: Can I get the data from the error without it being generated from the definition? Probably need to ask them for the ability to catalogue the error responses...
                                         continue;
                                     }
                                 }
-                                *markets
-                                    .entry(import.trade_symbol.to_string())
-                                    .or_insert((market_string.clone(), import.price)) =
-                                    (market_string.clone(), import.price);
                             }
                         }
-                        Err(res_err) => {
-                            println!("err {:?}", res_err);
-                            return Ok(());
+                    } else {
+                        // IF NEVER SURVEYED AT WAYPOINT
+                        // Survey
+                        println!(
+                            "Ship {} never surveyed at waypoint, try survey",
+                            ship.ship.symbol
+                        );
+                        let survey_result = create_survey(&client, ship.ship.symbol.as_str()).await;
+                        match survey_result {
+                            Ok(survey_response) => {
+                                // IF SURVEY SUCCESS
+                                println!("Ship {} survey success", ship.ship.symbol);
+                                // STORE RESULTS
+                                let surveys = survey_response.data.surveys;
+                                locked_cl
+                                    .ledger
+                                    .survey_data
+                                    .get_mut(mining_waypoint)
+                                    .unwrap()
+                                    .insert(surveys);
+                                // SORT RESULTS
+                                println!("Ship {} sorting survey", ship.ship.symbol);
+                                // TODO: GET MARKETS FROM ASTRONOMICON
+                                // locked_cl.ledger.survey_data.get(mining_waypoint).unwrap().sort_surveys_by_market_data(markets);
+                                locked_cl
+                                    .ledger
+                                    .survey_data
+                                    .get_mut(mining_waypoint)
+                                    .unwrap()
+                                    .sort_surveys_for_items(&active_contract_delivery_items);
+                                // MINE WITH SURVEY
+                                println!("Ship {} mining with survey", ship.ship.symbol);
+                                let target_survey = locked_cl.ledger.survey_data[mining_waypoint]
+                                    .most_recent_surveys[0]
+                                    .clone();
+                                extract_resources(
+                                    &client,
+                                    ship.ship.symbol.as_str(),
+                                    Some(ExtractResourcesRequest {
+                                        survey: Some(Box::new(target_survey)),
+                                    }),
+                                )
+                                .await
+                                .unwrap();
+                                continue;
+                            }
+                            Err(e) => {
+                                // IF SURVEY FAILURE
+                                println!(
+                                    "Ship {} survey on cooldown or hit error: {}",
+                                    ship.ship.symbol, e
+                                );
+                                // STORE COOLDOWN
+                                // TODO: Can I get the data from the error without it being generated from the definition? Probably need to ask them for the ability to catalogue the error responses...
+                                continue;
+                            }
                         }
                     }
-                }
-                println!(
-                    "Got Markets: {:#?}",
-                    markets
-                        .iter()
-                        .map(|(g, m)| format!("{}: {} @ {}", g, m.1, m.0))
-                        .collect::<Vec<String>>()
-                );
-                println!(
-                    "Ordering Surveys, starting order: {:#?}",
-                    surveys
-                        .iter()
-                        .map(|s| s.signature.to_string())
-                        .collect::<Vec<String>>()
-                );
-                sort_surveys_by_market_data(&mut surveys, &mut markets);
-                println!(
-                    "Ordered Surveys, new order: {:#?}",
-                    surveys
-                        .iter()
-                        .map(|s| s.signature.to_string())
-                        .collect::<Vec<String>>()
-                );
-                // surveys.sort_by_key(|s| (s.deposits.iter().filter(|&d| *d == best_goods[0]).count(), s.deposits.iter().filter(|&d| *d == best_goods[1]).count(), s.deposits.iter().filter(|&d| *d == best_goods[2]).count(), s.deposits.iter().filter(|&d| *d == best_goods[3]).count()));
-            }
-            // Save Surveys
-            save_surveys(surveys.clone(), "json/surveys.json").unwrap();
-            save_surveys(vec![], "json/temp_surveys.json").unwrap();
+                } else if ship.ship.nav.waypoint_symbol == deliver_waypoint {
+                    // IF AT DELIVERY SITE
+                    println!("Ship {} at delivery site", ship.ship.symbol);
+                    if ship.ship.cargo.units == 0 {
+                        // IF CARGO EMPTY
+                        println!("Ship {} cargo empty", ship.ship.symbol);
+                        // BUY FUEL
+                        println!("Ship {} refuel", ship.ship.symbol);
+                        refuel_ship(&client, ship.ship.symbol.as_str())
+                            .await
+                            .unwrap();
 
-            // Active Survey is selected from remaining sorted vec
-            let active_survey = surveys[0].clone();
-            let key = format!(
-                "{} | {:?} | {}",
-                active_survey.signature, active_survey.deposits, active_survey.expiration
-            );
-            println!("Selected Active Survey {}", key);
-            let as_timestamp = DateTime::parse_from_rfc3339(&active_survey.expiration.as_str())
-                .unwrap()
-                .timestamp();
-            println!(
-                "Active Survey has timestamp: {} >= {} ? {}",
-                as_timestamp,
-                now,
-                as_timestamp >= now
-            );
+                        // GO MINE
+                        println!("Ship {} navigate to mine", ship.ship.symbol);
+                        navigate_ship(
+                            &client,
+                            ship.ship.symbol.as_str(),
+                            Some(NavigateShipRequest {
+                                waypoint_symbol: mining_waypoint.to_string(),
+                            }),
+                        )
+                        .await
+                        .unwrap();
+                    } else {
+                        // IF CARGO NOT EMPTY
+                        println!(
+                            "Ship {} cargo not empty, attempt to deliver",
+                            ship.ship.symbol
+                        );
+                        // SELL/DELIVER
+                        // TODO: SELL LOGIC
+                        let contract_id = "clbi634e50007s60jlv42a0q6";
+                        deliver_contract(
+                            &client,
+                            contract_id,
+                            Some(DeliverContractRequest {
+                                ship_symbol: ship.ship.symbol,
+                                trade_symbol: ship.ship.cargo.inventory[0].symbol.to_string(),
+                                units: ship.ship.cargo.inventory[0].units,
+                            }),
+                        )
+                        .await
+                        .unwrap();
+                    }
+                } else {
+                    println!(
+                        "Ship {} at neither mining_waypoint {}, nor delivery waypoint{}, at: {}",
+                        ship.ship.symbol,
+                        mining_waypoint,
+                        deliver_waypoint,
+                        ship.ship.nav.waypoint_symbol
+                    );
+                    println!("Ship {} navigate to mine", ship.ship.symbol);
+                    navigate_ship(
+                        &client,
+                        ship.ship.symbol.as_str(),
+                        Some(NavigateShipRequest {
+                            waypoint_symbol: mining_waypoint.to_string(),
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                }
+                // println!("tx travel to X1-OE-A005");
+                // drop(locked_cl);
+                // match duty_tx.send(Duty::new(
+                //     DutyClass::Fly,
+                //     "X1-OE-A005".to_string(),
+                //     _client.clone(),
+                //     cl.clone(),
+                // )) {
+                //     Ok(_) => println!("tx travel to X1-OE-A005 SENT"),
+                //     Err(reserr) => println!("tx ERR {:#?}", reserr),
+                // }
+            }
 
-            // TODO: Loop this directly here updating ship from extraction response
-            // Use Active Survey to Extract Materials
-            println!(
-                "Extracting from Survey with Deposits: {:?}",
-                active_survey.deposits
-            );
-            let extraction_results: shared::ExtractData;
-            match _client
-                .extract_resources("GREEN-1".to_string(), Some(active_survey.clone()))
-                .await
-            {
-                Ok(res) => {
-                    println!("Got Extraction Results");
-                    extraction_results = res.data;
-                }
-                Err(err) => {
-                    println!("err {:?}", err);
-                    surveys.remove(0);
-                    continue;
-                    // return Ok(());
-                    // match err {
-                    //     spacedust::errors::SpaceTradersClientError::JsonParse(serde_json::Error { err }) => {
-                    //         let str_err: dyn std::error::Error = *err.into::<std::error::Error>();
-                    //         println!("Exhausted Error {}", *err.to_string());
-                    //         return Ok(());
-                    //     }
-                    //     _ => {
-                    //         println!("err {:?}", err);
-                    //         return Ok(());
-                    //     }
-                    // }
-                }
+            // TEMP: If explorer, conduct exploration
+            if ship.role == ShipRole::Explorer {
+                // TODO
             }
-            println!(
-                "Extraction Yield: {:#?}",
-                extraction_results.extraction.extract_yield
-            );
-            *stats.surveys.entry(key.to_string()).or_insert(0) += 1;
-            if stats.surveys.get(&key).unwrap() >= &20i64 {
-                surveys.remove(0);
-            }
-            save_stats(stats.clone())?;
-        } else {
-            println!("Error, At Unexpected Location: {}", location);
-            return Ok(());
         }
     }
+    Ok(())
 }

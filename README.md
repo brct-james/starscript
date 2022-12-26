@@ -1,6 +1,9 @@
 # starscript
 A rust client for the space-traders.io API V2
 
+## Todo
+
+- Automatically cycle through all idle ships, updating market info 
 
 ## Reference
 https://tokio.rs/tokio/tutorial/channels
