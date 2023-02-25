@@ -12,7 +12,7 @@ itertools = "0.10.3"
 serde_json = "1.0.60"
 env_logger = "0.10.0"
 tokio = { version = "1.23", features = ["full"] }
-spacedust = { path = "../spacedustrs" }
+spacedust = "1.0.1"
 flume = "0.10.12"
 ctrlc = "3.2.1"
 chrono = "0.4.19"
