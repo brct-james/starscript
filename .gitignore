@@ -11,3 +11,7 @@ Cargo.lock
 
 # Json Files
 *.json
+
+# Secrets
+*_secrets.env
+planning.md

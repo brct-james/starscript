@@ -16,3 +16,9 @@ spacedust = "1.0.1"
 flume = "0.10.12"
 ctrlc = "3.2.1"
 chrono = "0.4.19"
+log = "0.4.17"
+dotenv = "0.15.0"
+[dependencies.mongodb]
+version = "2.3.1"
+default-features = false
+features = ["async-std-runtime"]
