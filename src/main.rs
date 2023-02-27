@@ -12,6 +12,8 @@ use mongodb::{options::ClientOptions, Client};
 use dotenv;
 use std::env;
 
+use chrono::prelude::Utc;
+
 // API
 use spacedust::apis::agents_api::get_my_agent;
 use spacedust::apis::configuration::Configuration;
@@ -30,9 +32,10 @@ use spacedust::apis::configuration::Configuration;
 // mod signaller;
 
 mod cadet;
+use cadet::{admiral::Admiral, astropath::Astropath, factor::Factor, navigator::Navigator};
 
 mod log;
-use crate::log::{Log, LogSeverity};
+use crate::log::{Log, LogSeverity, ProcessState, ProcessStatus};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -59,18 +62,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create SPMC command channel, used to gracefully shutdown threads
     let (cmd_tx, cmd_rx) = tokio::sync::watch::channel("run".to_string());
+    cmd_tx.send("run".to_string()).unwrap();
+
+    // Get process status collection
+    let process_status_collection = log_db.collection("process_status");
+    process_status_collection.drop(None).await.unwrap();
 
     // Create MPMC log channel, used to route logs to the correct service
     let (log_tx, log_rx) = tokio::sync::broadcast::channel(8);
 
     // Get log collections for each level
     let routine_log_collection = log_db.collection("routine");
+    routine_log_collection.drop(None).await.unwrap();
     let priority_log_collection = log_db.collection("priority");
+    priority_log_collection.drop(None).await.unwrap();
     let critical_log_collection = log_db.collection("critical");
+    critical_log_collection.drop(None).await.unwrap();
 
     // Create log objects
     let mut routine_log = Log::new(
-        routine_log_collection,
+        routine_log_collection.clone(),
         "ROUTINE".to_string(),
         vec![
             LogSeverity::Routine,
@@ -81,32 +92,179 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         log_rx,
     );
     let mut priority_log = Log::new(
-        priority_log_collection,
+        priority_log_collection.clone(),
         "PRIORITY".to_string(),
         vec![LogSeverity::Priority, LogSeverity::Critical],
         cmd_rx.clone(),
         log_tx.subscribe(),
     );
     let mut critical_log = Log::new(
-        critical_log_collection,
+        critical_log_collection.clone(),
         "CRITICAL".to_string(),
         vec![LogSeverity::Critical],
         cmd_rx.clone(),
         log_tx.subscribe(),
     );
 
-    // Spawn threads for each log
-    tokio::spawn(async move { routine_log.initialize().await });
-    tokio::spawn(async move { priority_log.initialize().await });
-    tokio::spawn(async move { critical_log.initialize().await });
+    // Set Process Status for Logs to STARTING
+    process_status_collection
+        .insert_one(
+            to_document(&ProcessStatus::new(
+                "LOG_ROUTINE".to_string(),
+                ProcessState::STARTING,
+            ))
+            .unwrap(),
+            None,
+        )
+        .await?;
+    process_status_collection
+        .insert_one(
+            to_document(&ProcessStatus::new(
+                "LOG_PRIORITY".to_string(),
+                ProcessState::STARTING,
+            ))
+            .unwrap(),
+            None,
+        )
+        .await?;
+    process_status_collection
+        .insert_one(
+            to_document(&ProcessStatus::new(
+                "LOG_CRITICAL".to_string(),
+                ProcessState::STARTING,
+            ))
+            .unwrap(),
+            None,
+        )
+        .await?;
 
-    log_tx
-        .send(crate::log::Message::new(
-            LogSeverity::Critical,
-            "MAIN".to_string(),
-            "Logs Initialized at Startup".to_string(),
-        ))
-        .unwrap();
+    // Set Pre-Spawn Timestamp
+    let pre_log_spawn_timestamp = Utc::now();
+
+    // Spawn threads for each log
+    let routine_log_process_status_collection = process_status_collection.clone();
+    let priority_log_process_status_collection = process_status_collection.clone();
+    let critical_log_process_status_collection = process_status_collection.clone();
+    tokio::spawn(async move {
+        routine_log
+            .initialize(routine_log_process_status_collection)
+            .await
+    });
+    tokio::spawn(async move {
+        priority_log
+            .initialize(priority_log_process_status_collection)
+            .await
+    });
+    tokio::spawn(async move {
+        critical_log
+            .initialize(critical_log_process_status_collection)
+            .await
+    });
+
+    // Wait for Initialization Status to be Ready for Each in DB
+    let mut log_processes_ready = false;
+    let mut routine_process_state = "STARTING".to_string();
+    let mut priority_process_state = "STARTING".to_string();
+    let mut critical_process_state = "STARTING".to_string();
+
+    while log_processes_ready == false {
+        print!(
+            "\rWaiting for Logs to be State READY | Routine: {}, Priority: {}, Critical: {} | Time Elapsed: {}",
+            routine_process_state,
+            priority_process_state,
+            critical_process_state,
+            Utc::now()
+                .signed_duration_since(pre_log_spawn_timestamp)
+                .to_string()
+        );
+
+        // Check Statuses
+        let routine_process_found = process_status_collection
+            .find_one(Some(doc! {"process_id": "LOG_ROUTINE"}), None)
+            .await
+            .unwrap();
+        match routine_process_found {
+            Some(ref document) => {
+                routine_process_state = document.get_str("state").unwrap().to_string()
+            }
+            None => (),
+        }
+        let priority_process_found = process_status_collection
+            .find_one(Some(doc! {"process_id": "LOG_PRIORITY"}), None)
+            .await
+            .unwrap();
+        match priority_process_found {
+            Some(ref document) => {
+                priority_process_state = document.get_str("state").unwrap().to_string()
+            }
+            None => (),
+        }
+        let critical_process_found = process_status_collection
+            .find_one(Some(doc! {"process_id": "LOG_CRITICAL"}), None)
+            .await
+            .unwrap();
+        match critical_process_found {
+            Some(ref document) => {
+                critical_process_state = document.get_str("state").unwrap().to_string()
+            }
+            None => (),
+        }
+
+        log_processes_ready = routine_process_state == "READY".to_string()
+            && priority_process_state == "READY".to_string()
+            && critical_process_state == "READY".to_string();
+    }
+    print!(
+        "\rWaiting for Logs to be State READY | Routine: {}, Priority: {}, Critical: {} | Time Elapsed: {}\n",
+        routine_process_state,
+        priority_process_state,
+        critical_process_state,
+        Utc::now()
+            .signed_duration_since(pre_log_spawn_timestamp)
+            .to_string()
+    );
+    println!("All Logs Finished Initializing at Startup");
+
+    // Attempt Registration or Login
+    // TODO: Implement Here
+
+    // Get Agent Symbol
+    let agent_symbol: String = "".to_string();
+
+    // Create Cadets
+    // TODO: Implement Process_Status use here
+    // TODO: Figure out why after hitting 'All Non-Ensign Cadets Initialized' the program seems to hang, also nothing is being logged to routine in the intialize step of these?
+    let navigator = Navigator::new(
+        "NAV".to_string(),
+        agent_symbol.to_string(),
+        cmd_rx.clone(),
+        log_tx.clone(),
+    );
+    let factor = Factor::new(
+        "FAC".to_string(),
+        agent_symbol.to_string(),
+        cmd_rx.clone(),
+        log_tx.clone(),
+    );
+    let astropath = Astropath::new(
+        "AST".to_string(),
+        agent_symbol.to_string(),
+        cmd_rx.clone(),
+        log_tx.clone(),
+    );
+    let admiral = Admiral::new(
+        "ADM".to_string(),
+        agent_symbol.to_string(),
+        cmd_rx.clone(),
+        log_tx.clone(),
+    );
+
+    // Spawn threads for each cadet
+    tokio::spawn(async move { navigator.initialize().await });
+    tokio::spawn(async move { factor.initialize().await });
+    tokio::spawn(async move { astropath.initialize().await });
+    tokio::spawn(async move { admiral.initialize().await });
+    println!("All Non-Ensign Cadets Initialized");
 
     // Get handles for all the relevant collections
     // let account: Collection<Document> = db.collection("account");
