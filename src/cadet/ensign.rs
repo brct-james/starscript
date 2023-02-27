@@ -1,6 +1,6 @@
 use crate::log::{LogSeverity, Message};
 use crate::steward::Steward;
-use tokio::sync::broadcast::Sender as BroadcastSender;
+use tokio::sync::mpsc::Sender as MPSCSender;
 use tokio::sync::watch::Receiver as SPMCREceiver;
 
 pub struct Ensign {
@@ -8,7 +8,7 @@ pub struct Ensign {
     rank: String,
     agent_symbol: String,
     cmd_rx: SPMCREceiver<String>,
-    log_tx: BroadcastSender<Message>,
+    log_tx: MPSCSender<Message>,
     ship_symbol: String,
 }
 
@@ -17,7 +17,7 @@ impl Ensign {
         label: String,
         agent_symbol: String,
         cmd_rx: SPMCREceiver<String>,
-        log_tx: BroadcastSender<Message>,
+        log_tx: MPSCSender<Message>,
         ship_symbol: String,
     ) -> Self {
         Self {
@@ -44,6 +44,7 @@ impl Ensign {
                     self.rank, self.agent_symbol, self.label, self.ship_symbol
                 ),
             ))
+            .await
             .unwrap();
         steward.process_ready(process_id.to_string()).await;
         let mut cmd = "run".to_string();
@@ -60,6 +61,7 @@ impl Ensign {
                     self.rank, self.label, self.ship_symbol
                 ),
             ))
+            .await
             .unwrap();
     }
 }

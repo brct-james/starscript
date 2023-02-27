@@ -1,6 +1,6 @@
 use crate::log::{LogSeverity, Message};
 use crate::steward::Steward;
-use tokio::sync::broadcast::Sender as BroadcastSender;
+use tokio::sync::mpsc::Sender as MPSCSender;
 use tokio::sync::watch::Receiver as SPMCREceiver;
 
 pub struct Navigator {
@@ -8,7 +8,7 @@ pub struct Navigator {
     rank: String,
     agent_symbol: String,
     cmd_rx: SPMCREceiver<String>,
-    log_tx: BroadcastSender<Message>,
+    log_tx: MPSCSender<Message>,
 }
 
 impl Navigator {
@@ -16,7 +16,7 @@ impl Navigator {
         label: String,
         agent_symbol: String,
         cmd_rx: SPMCREceiver<String>,
-        log_tx: BroadcastSender<Message>,
+        log_tx: MPSCSender<Message>,
     ) -> Self {
         Self {
             label,
@@ -38,6 +38,7 @@ impl Navigator {
                     self.rank, self.agent_symbol, self.label
                 ),
             ))
+            .await
             .unwrap();
         steward.process_ready(process_id.to_string()).await;
         let mut cmd = "run".to_string();
@@ -51,6 +52,7 @@ impl Navigator {
                 process_id.to_string(),
                 format!("Closed {} with ID {}", self.rank, self.label),
             ))
+            .await
             .unwrap();
     }
 }

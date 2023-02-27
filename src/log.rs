@@ -1,9 +1,11 @@
+use std::collections::HashMap;
+
 use chrono::prelude::Utc;
 use mongodb::bson::{doc, to_document};
 use mongodb::{bson::Document, Collection};
 use serde::{Deserialize, Serialize};
-use tokio::sync::broadcast::error::TryRecvError;
-use tokio::sync::broadcast::Receiver as BroadcastReceiver;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::sync::mpsc::Receiver as MPSCReceiver;
 use tokio::sync::watch::Receiver as SPMCReceiver;
 
 use crate::steward::Steward;
@@ -50,7 +52,9 @@ impl Message {
     }
 }
 
-#[derive(strum_macros::Display, Serialize, Deserialize, Debug, Clone, Default, Eq, PartialEq)]
+#[derive(
+    strum_macros::Display, Serialize, Deserialize, Debug, Clone, Default, Eq, PartialEq, Hash,
+)]
 pub enum LogSeverity {
     #[default]
     Routine,
@@ -78,25 +82,22 @@ impl LogSchema {
 }
 
 pub struct Log {
-    table: Collection<Document>,
+    tables: HashMap<LogSeverity, Collection<Document>>,
     label: String,
-    severities: Vec<LogSeverity>,
     cmd_rx: SPMCReceiver<String>,
-    log_rx: BroadcastReceiver<Message>,
+    log_rx: MPSCReceiver<Message>,
 }
 
 impl Log {
     pub fn new(
-        table: Collection<Document>,
+        tables: HashMap<LogSeverity, Collection<Document>>,
         label: String,
-        severities: Vec<LogSeverity>,
         cmd_rx: SPMCReceiver<String>,
-        log_rx: BroadcastReceiver<Message>,
+        log_rx: MPSCReceiver<Message>,
     ) -> Self {
         Self {
-            table,
+            tables,
             label,
-            severities,
             cmd_rx,
             log_rx,
         }
@@ -104,18 +105,21 @@ impl Log {
 
     pub async fn initialize(&mut self, steward: Steward) {
         // Log Initialized Message
-        let process_id = format!("LOG::{}", self.label);
-        let init_message = LogSchema::new(
-            LogSeverity::Critical.to_string(),
-            "LOG".to_string(),
-            format!(
-                "Initializing '{}' with severities {:?}",
+        let process_id = format!("{}", self.label);
+
+        for (severity, table) in self.tables.iter() {
+            let init_message = LogSchema::new(
+                severity.to_string(),
                 process_id.to_string(),
-                self.format_severities(&self.severities)
-            ),
-        );
-        let init_document = to_document(&init_message).unwrap();
-        self.table.insert_one(init_document, None).await.unwrap();
+                format!(
+                    "Initializing {} - {}",
+                    process_id.to_string(),
+                    severity.to_string(),
+                ),
+            );
+            let init_document = to_document(&init_message).unwrap();
+            table.insert_one(init_document, None).await.unwrap();
+        }
 
         // Set Process Status
         steward.process_ready(process_id.to_string()).await;
@@ -126,45 +130,39 @@ impl Log {
             let recv = self.log_rx.try_recv();
             match recv {
                 Ok(msg) => {
-                    println!(
-                        "\n{} MESSAGE FROM {}, SEVERITY: {:?} IN {:?}?{}\n",
-                        process_id,
-                        msg.origin,
-                        msg.severity,
-                        self.severities,
-                        self.severities.contains(&msg.severity)
-                    );
-                    let message = LogSchema::new(
-                        "TEST".to_string(),
-                        msg.origin.to_string(),
-                        msg.content.to_string(),
-                    );
-                    let document = to_document(&message).unwrap();
-                    self.table.insert_one(document, None).await.unwrap();
-                    if self.severities.contains(&msg.severity) {
+                    let log_to_severities: Vec<LogSeverity>;
+                    match msg.severity {
+                        LogSeverity::Routine => {
+                            log_to_severities = vec![LogSeverity::Routine];
+                        }
+                        LogSeverity::Priority => {
+                            log_to_severities = vec![LogSeverity::Routine, LogSeverity::Priority];
+                        }
+                        LogSeverity::Critical => {
+                            log_to_severities = vec![
+                                LogSeverity::Routine,
+                                LogSeverity::Priority,
+                                LogSeverity::Critical,
+                            ];
+                        }
+                    }
+
+                    for severity in log_to_severities {
+                        let table = self.tables.get(&severity).unwrap();
                         let message = LogSchema::new(
                             msg.severity.to_string(),
                             msg.origin.to_string(),
                             msg.content.to_string(),
                         );
                         let document = to_document(&message).unwrap();
-                        self.table.insert_one(document, None).await.unwrap();
+                        table.insert_one(document, None).await.unwrap();
                     }
                 }
                 Err(TryRecvError::Empty) => (),
-                Err(TryRecvError::Closed) => panic!("LOG TX CLOSED"),
-                Err(e) => println!("LOG LAGGED: {}", e),
+                Err(TryRecvError::Disconnected) => panic!("LOG TX DISCONNECTED"),
             }
         }
         steward.process_stop(process_id.to_string()).await;
         println!("Closed log {}", self.label);
-    }
-
-    fn format_severities(&self, severities: &Vec<LogSeverity>) -> Vec<String> {
-        let mut res: Vec<String> = Default::default();
-        for sev in severities {
-            res.push(sev.to_string());
-        }
-        return res;
     }
 }

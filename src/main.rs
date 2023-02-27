@@ -10,6 +10,7 @@ use mongodb::options::ReplaceOptions;
 use mongodb::{options::ClientOptions, Client};
 
 use dotenv;
+use std::collections::HashMap;
 use std::env;
 
 use chrono::prelude::Utc;
@@ -73,95 +74,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let steward = Steward::new(process_status_collection);
 
     // Create MPMC log channel, used to route logs to the correct service
-    let (log_tx, log_rx) = tokio::sync::broadcast::channel(8);
+    let (log_tx, log_rx) = tokio::sync::mpsc::channel(1);
 
     // Get log collections for each level
+    let mut log_collection_hashmap: HashMap<LogSeverity, Collection<Document>> = HashMap::new();
     let routine_log_collection = log_db.collection("routine");
     routine_log_collection.drop(None).await.unwrap();
+    log_collection_hashmap.insert(LogSeverity::Routine, routine_log_collection);
     let priority_log_collection = log_db.collection("priority");
     priority_log_collection.drop(None).await.unwrap();
+    log_collection_hashmap.insert(LogSeverity::Priority, priority_log_collection);
     let critical_log_collection = log_db.collection("critical");
     critical_log_collection.drop(None).await.unwrap();
+    log_collection_hashmap.insert(LogSeverity::Critical, critical_log_collection);
 
     // Create log objects
-    let mut routine_log = Log::new(
-        routine_log_collection.clone(),
-        "ROUTINE".to_string(),
-        vec![
-            LogSeverity::Routine,
-            LogSeverity::Priority,
-            LogSeverity::Critical,
-        ],
+    let mut log_object = Log::new(
+        log_collection_hashmap.clone(),
+        "LOG".to_string(),
         cmd_rx.clone(),
         log_rx,
     );
-    let mut priority_log = Log::new(
-        priority_log_collection.clone(),
-        "PRIORITY".to_string(),
-        vec![LogSeverity::Priority, LogSeverity::Critical],
-        cmd_rx.clone(),
-        log_tx.subscribe(),
-    );
-    let mut critical_log = Log::new(
-        critical_log_collection.clone(),
-        "CRITICAL".to_string(),
-        vec![LogSeverity::Critical],
-        cmd_rx.clone(),
-        log_tx.subscribe(),
-    );
-
     // Set Process Status for Logs to STARTING
-    steward.process_start("LOG::ROUTINE".to_string()).await;
-    steward.process_start("LOG::PRIORITY".to_string()).await;
-    steward.process_start("LOG::CRITICAL".to_string()).await;
+    steward.process_start("LOG".to_string()).await;
 
     // Set Pre-Spawn Timestamp
     let pre_log_spawn_timestamp = Utc::now();
 
     // Spawn threads for each log
-    let routine_log_steward = steward.clone();
-    let priority_log_steward = steward.clone();
-    let critical_log_steward = steward.clone();
-    tokio::spawn(async move { routine_log.initialize(routine_log_steward).await });
-    tokio::spawn(async move { priority_log.initialize(priority_log_steward).await });
-    tokio::spawn(async move { critical_log.initialize(critical_log_steward).await });
+    let log_steward = steward.clone();
+    tokio::spawn(async move { log_object.initialize(log_steward).await });
 
     // Wait for Initialization Status to be Ready for Each in DB
-    let mut log_processes_ready = false;
-    let mut routine_process_state = "STARTING".to_string();
-    let mut priority_process_state = "STARTING".to_string();
-    let mut critical_process_state = "STARTING".to_string();
+    let mut log_process_state = "STARTING".to_string();
 
-    while log_processes_ready == false {
+    while log_process_state == "READY".to_string() {
         print!(
-            "\rWaiting for Logs to be State READY | Routine: {}, Priority: {}, Critical: {} | Time Elapsed: {}",
-            routine_process_state,
-            priority_process_state,
-            critical_process_state,
+            "\rWaiting for Log to be State READY: {} | Time Elapsed: {}",
+            log_process_state,
             Utc::now()
                 .signed_duration_since(pre_log_spawn_timestamp)
                 .to_string()
         );
 
         // Check Statuses
-        routine_process_state = steward.get_process_state("LOG::ROUTINE".to_string()).await;
-        priority_process_state = steward.get_process_state("LOG::PRIORITY".to_string()).await;
-        critical_process_state = steward.get_process_state("LOG::CRITICAL".to_string()).await;
-
-        log_processes_ready = routine_process_state == "READY".to_string()
-            && priority_process_state == "READY".to_string()
-            && critical_process_state == "READY".to_string();
+        log_process_state = steward.get_process_state("LOG".to_string()).await;
     }
     print!(
-        "\rWaiting for Logs to be State READY | Routine: {}, Priority: {}, Critical: {} | Time Elapsed: {}\n",
-        routine_process_state,
-        priority_process_state,
-        critical_process_state,
+        "\rWaiting for Log to be State READY: {} | Time Elapsed: {}\n",
+        log_process_state,
         Utc::now()
             .signed_duration_since(pre_log_spawn_timestamp)
             .to_string()
     );
-    println!("All Logs Finished Initializing at Startup");
+    println!("Log Finished Initializing at Startup");
 
     // Attempt Registration or Login
     // TODO: Implement Here
