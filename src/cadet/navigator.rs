@@ -1,9 +1,10 @@
 use crate::log::{LogSeverity, Message};
+use crate::steward::Steward;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::watch::Receiver as SPMCREceiver;
 
 pub struct Navigator {
-    id: String,
+    label: String,
     rank: String,
     agent_symbol: String,
     cmd_rx: SPMCREceiver<String>,
@@ -12,13 +13,13 @@ pub struct Navigator {
 
 impl Navigator {
     pub fn new(
-        id: String,
+        label: String,
         agent_symbol: String,
         cmd_rx: SPMCREceiver<String>,
         log_tx: BroadcastSender<Message>,
     ) -> Self {
         Self {
-            id,
+            label,
             rank: "Navigator".to_string(),
             agent_symbol,
             cmd_rx,
@@ -26,26 +27,29 @@ impl Navigator {
         }
     }
 
-    pub async fn initialize(&self) {
+    pub async fn initialize(&self, steward: Steward) {
+        let process_id = format!("{}::{}", self.agent_symbol, self.label);
         self.log_tx
             .send(Message::new(
                 LogSeverity::Routine,
-                format!("{}: {} - {}", self.agent_symbol, self.rank, self.id),
+                process_id.to_string(),
                 format!(
                     "Initializing {} for agent {} with ID {} ",
-                    self.rank, self.agent_symbol, self.id
+                    self.rank, self.agent_symbol, self.label
                 ),
             ))
             .unwrap();
+        steward.process_ready(process_id.to_string()).await;
         let mut cmd = "run".to_string();
         while cmd == "run".to_string() {
             cmd = self.cmd_rx.borrow().to_string();
         }
+        steward.process_stop(process_id.to_string()).await;
         self.log_tx
             .send(Message::new(
                 LogSeverity::Routine,
-                format!("{}: {} - {}", self.agent_symbol, self.rank, self.id),
-                format!("Closed {} with ID {}", self.rank, self.id),
+                process_id.to_string(),
+                format!("Closed {} with ID {}", self.rank, self.label),
             ))
             .unwrap();
     }

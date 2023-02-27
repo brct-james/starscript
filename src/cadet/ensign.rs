@@ -1,9 +1,10 @@
 use crate::log::{LogSeverity, Message};
+use crate::steward::Steward;
 use tokio::sync::broadcast::Sender as BroadcastSender;
 use tokio::sync::watch::Receiver as SPMCREceiver;
 
 pub struct Ensign {
-    id: String,
+    label: String,
     rank: String,
     agent_symbol: String,
     cmd_rx: SPMCREceiver<String>,
@@ -13,14 +14,14 @@ pub struct Ensign {
 
 impl Ensign {
     pub fn new(
-        id: String,
+        label: String,
         agent_symbol: String,
         cmd_rx: SPMCREceiver<String>,
         log_tx: BroadcastSender<Message>,
         ship_symbol: String,
     ) -> Self {
         Self {
-            id,
+            label,
             rank: "Ensign".to_string(),
             agent_symbol,
             cmd_rx,
@@ -29,32 +30,35 @@ impl Ensign {
         }
     }
 
-    pub async fn initialize(&self) {
+    pub async fn initialize(&self, steward: Steward) {
+        let process_id = format!(
+            "{}::{}::{}",
+            self.agent_symbol, self.label, self.ship_symbol
+        );
         self.log_tx
             .send(Message::new(
                 LogSeverity::Routine,
+                process_id.to_string(),
                 format!(
-                    "{} ({}): {} - {}",
-                    self.agent_symbol, self.ship_symbol, self.rank, self.id
-                ),
-                format!(
-                    "Initializing {} for agent {} and ship {} with ID {} ",
-                    self.rank, self.agent_symbol, self.ship_symbol, self.id
+                    "Initializing {} for agent {} with ID {} for ship {}",
+                    self.rank, self.agent_symbol, self.label, self.ship_symbol
                 ),
             ))
             .unwrap();
+        steward.process_ready(process_id.to_string()).await;
         let mut cmd = "run".to_string();
         while cmd == "run".to_string() {
             cmd = self.cmd_rx.borrow().to_string();
         }
+        steward.process_stop(process_id.to_string()).await;
         self.log_tx
             .send(Message::new(
                 LogSeverity::Routine,
+                process_id.to_string(),
                 format!(
-                    "{} ({}): {} - {}",
-                    self.agent_symbol, self.ship_symbol, self.rank, self.id
+                    "Closed {} with ID {} for ship {}",
+                    self.rank, self.label, self.ship_symbol
                 ),
-                format!("Closed {} with ID {}", self.rank, self.id),
             ))
             .unwrap();
     }
