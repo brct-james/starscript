@@ -18,6 +18,8 @@ ctrlc = "3.2.1"
 chrono = "0.4.19"
 log = "0.4.17"
 dotenv = "0.15.0"
+http = "0.2.9"
+futures = "0.3.26"
 [dependencies.mongodb]
 version = "2.3.1"
 default-features = false

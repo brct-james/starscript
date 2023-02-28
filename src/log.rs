@@ -8,7 +8,8 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver as MPSCReceiver;
 use tokio::sync::watch::Receiver as SPMCReceiver;
 
-use crate::steward::Steward;
+use crate::safe_panic::safe_panic;
+use crate::steward::{ProcessState, Steward};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct ProcessStatus {
@@ -25,14 +26,6 @@ impl ProcessStatus {
             state: state.to_string(),
         }
     }
-}
-
-#[derive(strum_macros::Display, Serialize, Deserialize, Debug, Clone, Default, Eq, PartialEq)]
-pub enum ProcessState {
-    #[default]
-    STARTING,
-    READY,
-    CLOSED,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
@@ -86,6 +79,7 @@ pub struct Log {
     label: String,
     cmd_rx: SPMCReceiver<String>,
     log_rx: MPSCReceiver<Message>,
+    log_to_severities: HashMap<LogSeverity, Vec<LogSeverity>>,
 }
 
 impl Log {
@@ -100,6 +94,21 @@ impl Log {
             label,
             cmd_rx,
             log_rx,
+            log_to_severities: HashMap::from([
+                (LogSeverity::Routine, vec![LogSeverity::Routine]),
+                (
+                    LogSeverity::Priority,
+                    vec![LogSeverity::Routine, LogSeverity::Priority],
+                ),
+                (
+                    LogSeverity::Critical,
+                    vec![
+                        LogSeverity::Routine,
+                        LogSeverity::Priority,
+                        LogSeverity::Critical,
+                    ],
+                ),
+            ]),
         }
     }
 
@@ -130,36 +139,34 @@ impl Log {
             let recv = self.log_rx.try_recv();
             match recv {
                 Ok(msg) => {
-                    let log_to_severities: Vec<LogSeverity>;
-                    match msg.severity {
-                        LogSeverity::Routine => {
-                            log_to_severities = vec![LogSeverity::Routine];
-                        }
-                        LogSeverity::Priority => {
-                            log_to_severities = vec![LogSeverity::Routine, LogSeverity::Priority];
-                        }
-                        LogSeverity::Critical => {
-                            log_to_severities = vec![
-                                LogSeverity::Routine,
-                                LogSeverity::Priority,
-                                LogSeverity::Critical,
-                            ];
-                        }
-                    }
+                    let message = LogSchema::new(
+                        msg.severity.to_string(),
+                        msg.origin.to_string(),
+                        msg.content.to_string(),
+                    );
 
-                    for severity in log_to_severities {
-                        let table = self.tables.get(&severity).unwrap();
-                        let message = LogSchema::new(
-                            msg.severity.to_string(),
-                            msg.origin.to_string(),
-                            msg.content.to_string(),
-                        );
+                    for severity in self.log_to_severities.get(&msg.severity).unwrap() {
                         let document = to_document(&message).unwrap();
+                        let table = self.tables.get(severity).unwrap();
                         table.insert_one(document, None).await.unwrap();
                     }
                 }
                 Err(TryRecvError::Empty) => (),
-                Err(TryRecvError::Disconnected) => panic!("LOG TX DISCONNECTED"),
+                Err(TryRecvError::Disconnected) => {
+                    let message = LogSchema::new(
+                        LogSeverity::Critical.to_string(),
+                        "LOG".to_string(),
+                        "LOG TX DISCONNECTED".to_string(),
+                    );
+
+                    for severity in self.log_to_severities.get(&LogSeverity::Critical).unwrap() {
+                        let document = to_document(&message).unwrap();
+                        let table = self.tables.get(severity).unwrap();
+                        table.insert_one(document, None).await.unwrap();
+                    }
+
+                    safe_panic("LOG TX DISCONNECTED".to_string(), &steward).await;
+                }
             }
         }
         steward.process_stop(process_id.to_string()).await;

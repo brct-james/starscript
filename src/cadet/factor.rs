@@ -46,13 +46,6 @@ impl Factor {
             cmd = self.cmd_rx.borrow().to_string();
         }
         steward.process_stop(process_id.to_string()).await;
-        self.log_tx
-            .send(Message::new(
-                LogSeverity::Routine,
-                process_id.to_string(),
-                format!("Closed {} with ID {}", self.rank, self.label),
-            ))
-            .await
-            .unwrap();
+        println!("Closed cadet {}", self.label);
     }
 }

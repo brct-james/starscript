@@ -3,6 +3,7 @@ use crate::steward::Steward;
 use tokio::sync::mpsc::Sender as MPSCSender;
 use tokio::sync::watch::Receiver as SPMCREceiver;
 
+#[allow(dead_code)]
 pub struct Ensign {
     label: String,
     rank: String,
@@ -12,6 +13,7 @@ pub struct Ensign {
     ship_symbol: String,
 }
 
+#[allow(dead_code)]
 impl Ensign {
     pub fn new(
         label: String,
@@ -52,16 +54,6 @@ impl Ensign {
             cmd = self.cmd_rx.borrow().to_string();
         }
         steward.process_stop(process_id.to_string()).await;
-        self.log_tx
-            .send(Message::new(
-                LogSeverity::Routine,
-                process_id.to_string(),
-                format!(
-                    "Closed {} with ID {} for ship {}",
-                    self.rank, self.label, self.ship_symbol
-                ),
-            ))
-            .await
-            .unwrap();
+        println!("Closed cadet {}", self.label);
     }
 }
