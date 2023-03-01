@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
 use chrono::prelude::Utc;
+use futures::FutureExt;
 use mongodb::bson::{doc, to_document};
 use mongodb::{bson::Document, Collection};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::Receiver as MPSCReceiver;
 use tokio::sync::watch::Receiver as SPMCReceiver;
 
@@ -133,43 +133,65 @@ impl Log {
         // Set Process Status
         steward.process_ready(process_id.to_string()).await;
 
-        let mut cmd = "run".to_string();
-        while cmd == "run".to_string() {
-            cmd = self.cmd_rx.borrow().to_string();
-            let recv = self.log_rx.try_recv();
-            match recv {
-                Ok(msg) => {
-                    let message = LogSchema::new(
-                        msg.severity.to_string(),
-                        msg.origin.to_string(),
-                        msg.content.to_string(),
-                    );
+        // Use try_select to watch for either a log message or a command
+        // let try_select_result = futures::future::try_select(self.log_rx.recv().map(|l| -> Result<Message, String> {
+        //     match l {
+        //         Some(message) => Ok(message),
+        //         None => Err("No Log Message".to_string()),
+        //     }
+        // }).boxed(), self.cmd_rx.changed().boxed()).await;
 
-                    for severity in self.log_to_severities.get(&msg.severity).unwrap() {
-                        let document = to_document(&message).unwrap();
-                        let table = self.tables.get(severity).unwrap();
-                        table.insert_one(document, None).await.unwrap();
+        // match try_select_result {
+        //     Ok(either_ok) => {
+        //         let res = futures::future::Either::into_inner(either_ok);
+        //     },
+        //     Err(either_err) => safe_panic("Error while awaiting log or command: {:#?}", e)
+        // }
+
+        // Use select to follow the branch for if either cmd or msg received
+        loop {
+            futures::select! {
+                _ = self.cmd_rx.changed().fuse() => {
+                    let cmd = self.cmd_rx.borrow().to_string();
+                    if cmd == String::from("shutdown") {
+                        steward.process_stop(process_id.to_string()).await;
+                        println!("Closed log {}", self.label);
+                        return;
                     }
-                }
-                Err(TryRecvError::Empty) => (),
-                Err(TryRecvError::Disconnected) => {
-                    let message = LogSchema::new(
-                        LogSeverity::Critical.to_string(),
-                        "LOG".to_string(),
-                        "LOG TX DISCONNECTED".to_string(),
-                    );
+                },
+                message = self.log_rx.recv().fuse() => {
+                    match message {
+                        Some(msg) => {
+                            let log_msg = LogSchema::new(
+                                msg.severity.to_string(),
+                                msg.origin.to_string(),
+                                msg.content.to_string(),
+                            );
 
-                    for severity in self.log_to_severities.get(&LogSeverity::Critical).unwrap() {
-                        let document = to_document(&message).unwrap();
-                        let table = self.tables.get(severity).unwrap();
-                        table.insert_one(document, None).await.unwrap();
+                            for severity in self.log_to_severities.get(&msg.severity).unwrap() {
+                                let document = to_document(&log_msg).unwrap();
+                                let table = self.tables.get(severity).unwrap();
+                                table.insert_one(document, None).await.unwrap();
+                            }
+                        },
+                        None => {
+                            let log_msg = LogSchema::new(
+                                LogSeverity::Critical.to_string(),
+                                "LOG".to_string(),
+                                "LOG TX DISCONNECTED".to_string(),
+                            );
+
+                            for severity in self.log_to_severities.get(&LogSeverity::Critical).unwrap() {
+                                let document = to_document(&log_msg).unwrap();
+                                let table = self.tables.get(severity).unwrap();
+                                table.insert_one(document, None).await.unwrap();
+                            }
+
+                            safe_panic("LOG TX DISCONNECTED".to_string(), &steward).await;
+                        }
                     }
-
-                    safe_panic("LOG TX DISCONNECTED".to_string(), &steward).await;
-                }
+                },
             }
         }
-        steward.process_stop(process_id.to_string()).await;
-        println!("Closed log {}", self.label);
     }
 }

@@ -77,7 +77,7 @@ impl Steward {
         self.process_status_table
             .replace_one(
                 doc! {"process_id": pid.to_string()},
-                to_document(&ProcessStatus::new(pid.to_string(), ProcessState::CLOSED)).unwrap(),
+                to_document(&ProcessStatus::new(pid.to_string(), ProcessState::CLOSE)).unwrap(),
                 Some(ReplaceOptions::builder().upsert(true).build()),
             )
             .await
@@ -92,7 +92,7 @@ impl Steward {
         let filtered_cursor = self
             .process_status_table
             .find(
-                Some(doc! {"state": { "$ne": ProcessState::CLOSED.to_string() }}),
+                Some(doc! {"state": { "$ne": ProcessState::CLOSE.to_string() }}),
                 None,
             )
             .await

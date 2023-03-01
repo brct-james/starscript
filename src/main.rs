@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
+use tokio::time::{sleep, Duration};
 
 use http::status::StatusCode;
 
@@ -87,25 +88,25 @@ async fn main() {
     for (agent_symbol, _) in logged_in_agents {
         println!("Creating Cadets for Agent {}", agent_symbol);
         // Create Cadets
-        let navigator = Navigator::new(
+        let mut navigator = Navigator::new(
             "NAVIGATOR".to_string(),
             agent_symbol.to_string(),
             cmd_rx.clone(),
             log_tx.clone(),
         );
-        let factor = Factor::new(
+        let mut factor = Factor::new(
             "FACTOR".to_string(),
             agent_symbol.to_string(),
             cmd_rx.clone(),
             log_tx.clone(),
         );
-        let astropath = Astropath::new(
+        let mut astropath = Astropath::new(
             "ASTROPATH".to_string(),
             agent_symbol.to_string(),
             cmd_rx.clone(),
             log_tx.clone(),
         );
-        let admiral = Admiral::new(
+        let mut admiral = Admiral::new(
             "ADMIRAL".to_string(),
             agent_symbol.to_string(),
             cmd_rx.clone(),
@@ -129,6 +130,7 @@ async fn main() {
         // Set Pre-Spawn Timestamp
         let pre_cadet_spawn_timestamp = Utc::now();
 
+        println!("Processes Marked as Start for each Cadet, now Spawning for Initialization");
         // Spawn threads for each cadet
         let navigator_steward = steward.clone();
         tokio::spawn(async move { navigator.initialize(navigator_steward).await });
@@ -141,23 +143,13 @@ async fn main() {
 
         // Wait for Initialization Status to be Ready for Each in DB
         let mut cadet_processes_ready = false;
-        let mut navigator_process_state = "STARTING".to_string();
-        let mut factor_process_state = "STARTING".to_string();
-        let mut astropath_process_state = "STARTING".to_string();
-        let mut admiral_process_state = "STARTING".to_string();
+        let mut navigator_process_state: String;
+        let mut factor_process_state: String;
+        let mut astropath_process_state: String;
+        let mut admiral_process_state: String;
 
+        println!("Processes spawned, polling process_status table to check whether cadets are initialized");
         while cadet_processes_ready == false {
-            print!(
-                "\rWaiting for Cadets to be State READY | Navigator: {}, Factor: {}, Astropath: {}, Admiral: {} | Time Elapsed: {}s",
-                navigator_process_state,
-                factor_process_state,
-                astropath_process_state,
-                admiral_process_state,
-                Utc::now()
-                    .signed_duration_since(pre_cadet_spawn_timestamp)
-                    .num_seconds()
-            );
-
             // Check Statuses
             navigator_process_state = steward
                 .get_process_state(format!("{}::NAVIGATOR", agent_symbol))
@@ -176,17 +168,20 @@ async fn main() {
                 && factor_process_state == "READY".to_string()
                 && astropath_process_state == "READY".to_string()
                 && admiral_process_state == "READY".to_string();
+
+            println!(
+                "Waiting for Cadets to be State READY | Navigator: {}, Factor: {}, Astropath: {}, Admiral: {} | Time Elapsed: {}s",
+                navigator_process_state,
+                factor_process_state,
+                astropath_process_state,
+                admiral_process_state,
+                Utc::now()
+                    .signed_duration_since(pre_cadet_spawn_timestamp)
+                    .num_seconds()
+            );
+
+            sleep(Duration::from_millis(100)).await;
         }
-        print!(
-            "\rWaiting for Cadets to be State READY | Navigator: {}, Factor: {}, Astropath: {}, Admiral: {} | Time Elapsed: {}s\n",
-            navigator_process_state,
-            factor_process_state,
-            astropath_process_state,
-            admiral_process_state,
-            Utc::now()
-                .signed_duration_since(pre_cadet_spawn_timestamp)
-                .num_seconds()
-        );
 
         println!(
             "All Non-Ensign Cadets Initialized for Agent {}",
@@ -426,24 +421,18 @@ async fn setup_logging(
     let mut log_process_state = "STARTING".to_string();
 
     while log_process_state == "READY".to_string() {
+        // Check Statuses
+        log_process_state = steward.get_process_state("LOG".to_string()).await;
+
+        sleep(Duration::from_millis(1000)).await;
         print!(
-            "\rWaiting for Log to be State READY: {} | Time Elapsed: {}s",
+            "Waiting for Log to be State READY: {} | Time Elapsed: {}s",
             log_process_state,
             Utc::now()
                 .signed_duration_since(pre_log_spawn_timestamp)
                 .num_seconds()
         );
-
-        // Check Statuses
-        log_process_state = steward.get_process_state("LOG".to_string()).await;
     }
-    print!(
-        "\rWaiting for Log to be State READY: {} | Time Elapsed: {}s\n",
-        log_process_state,
-        Utc::now()
-            .signed_duration_since(pre_log_spawn_timestamp)
-            .num_seconds()
-    );
 
     return (log_tx.clone(), steward.clone());
 }
