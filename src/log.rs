@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use chrono::prelude::Utc;
 use futures::FutureExt;
 use mongodb::bson::{doc, to_document, DateTime, Document};
@@ -77,40 +75,24 @@ impl LogSchema {
 }
 
 pub struct Log {
-    tables: HashMap<LogSeverity, Collection<Document>>,
+    table: Collection<Document>,
     label: String,
     cmd_rx: SPMCReceiver<String>,
     log_rx: MPSCReceiver<Message>,
-    log_to_severities: HashMap<LogSeverity, Vec<LogSeverity>>,
 }
 
 impl Log {
     pub fn new(
-        tables: HashMap<LogSeverity, Collection<Document>>,
+        table: Collection<Document>,
         label: String,
         cmd_rx: SPMCReceiver<String>,
         log_rx: MPSCReceiver<Message>,
     ) -> Self {
         Self {
-            tables,
+            table,
             label,
             cmd_rx,
             log_rx,
-            log_to_severities: HashMap::from([
-                (LogSeverity::Routine, vec![LogSeverity::Routine]),
-                (
-                    LogSeverity::Priority,
-                    vec![LogSeverity::Routine, LogSeverity::Priority],
-                ),
-                (
-                    LogSeverity::Critical,
-                    vec![
-                        LogSeverity::Routine,
-                        LogSeverity::Priority,
-                        LogSeverity::Critical,
-                    ],
-                ),
-            ]),
         }
     }
 
@@ -118,37 +100,20 @@ impl Log {
         // Log Initialized Message
         let process_id = format!("{}", self.label);
 
-        for (severity, table) in self.tables.iter() {
-            let init_message = LogSchema::new(
-                severity.to_string(),
+        let init_message = LogSchema::new(
+            LogSeverity::Routine.to_string(),
+            process_id.to_string(),
+            format!(
+                "Initializing {} - {}",
                 process_id.to_string(),
-                format!(
-                    "Initializing {} - {}",
-                    process_id.to_string(),
-                    severity.to_string(),
-                ),
-            );
-            let init_document = to_document(&init_message).unwrap();
-            table.insert_one(init_document, None).await.unwrap();
-        }
+                LogSeverity::Routine.to_string(),
+            ),
+        );
+        let init_document = to_document(&init_message).unwrap();
+        self.table.insert_one(init_document, None).await.unwrap();
 
         // Set Process Status
         steward.process_ready(process_id.to_string()).await;
-
-        // Use try_select to watch for either a log message or a command
-        // let try_select_result = futures::future::try_select(self.log_rx.recv().map(|l| -> Result<Message, String> {
-        //     match l {
-        //         Some(message) => Ok(message),
-        //         None => Err("No Log Message".to_string()),
-        //     }
-        // }).boxed(), self.cmd_rx.changed().boxed()).await;
-
-        // match try_select_result {
-        //     Ok(either_ok) => {
-        //         let res = futures::future::Either::into_inner(either_ok);
-        //     },
-        //     Err(either_err) => safe_panic("Error while awaiting log or command: {:#?}", e)
-        // }
 
         // Use select to follow the branch for if either cmd or msg received
         loop {
@@ -170,11 +135,8 @@ impl Log {
                                 msg.content.to_string(),
                             );
 
-                            for severity in self.log_to_severities.get(&msg.severity).unwrap() {
-                                let document = to_document(&log_msg).unwrap();
-                                let table = self.tables.get(severity).unwrap();
-                                table.insert_one(document, None).await.unwrap();
-                            }
+                            let document = to_document(&log_msg).unwrap();
+                            self.table.insert_one(document, None).await.unwrap();
                         },
                         None => {
                             let log_msg = LogSchema::new(
@@ -183,11 +145,8 @@ impl Log {
                                 "LOG TX DISCONNECTED".to_string(),
                             );
 
-                            for severity in self.log_to_severities.get(&LogSeverity::Critical).unwrap() {
-                                let document = to_document(&log_msg).unwrap();
-                                let table = self.tables.get(severity).unwrap();
-                                table.insert_one(document, None).await.unwrap();
-                            }
+                            let document = to_document(&log_msg).unwrap();
+                            self.table.insert_one(document, None).await.unwrap();
 
                             safe_panic("LOG TX DISCONNECTED".to_string(), &steward).await;
                         }

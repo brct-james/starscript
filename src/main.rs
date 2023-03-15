@@ -482,9 +482,7 @@ async fn setup_logging(
         log_db,
         HashMap::from([
             ("process_status".to_string(), true),
-            ("routine".to_string(), true),
-            ("priority".to_string(), true),
-            ("critical".to_string(), true),
+            ("log".to_string(), true),
         ]),
     )
     .await;
@@ -495,24 +493,9 @@ async fn setup_logging(
         Arc::new(cmd_tx),
     );
 
-    // Get log collections keyed on LogSeverity for each level
-    let mut log_collection_hashmap: HashMap<LogSeverity, Collection<Document>> = HashMap::new();
-    log_collection_hashmap.insert(
-        LogSeverity::Routine,
-        log_collections.get("routine").unwrap().clone(),
-    );
-    log_collection_hashmap.insert(
-        LogSeverity::Priority,
-        log_collections.get("priority").unwrap().clone(),
-    );
-    log_collection_hashmap.insert(
-        LogSeverity::Critical,
-        log_collections.get("critical").unwrap().clone(),
-    );
-
-    // Create log objects
+    // Create log object
     let mut log_object = Log::new(
-        log_collection_hashmap.clone(),
+        log_collections.get("log").unwrap().clone(),
         "LOG".to_string(),
         cmd_rx.clone(),
         log_rx,
