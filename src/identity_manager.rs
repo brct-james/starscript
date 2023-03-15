@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 pub struct AgentIdentity {
+    uuid: bson::Uuid,
     symbol: String,
     token: String,
     created_timestamp: String,
@@ -16,6 +17,7 @@ pub struct AgentIdentity {
 impl AgentIdentity {
     pub fn new(symbol: String, token: String) -> Self {
         Self {
+            uuid: bson::Uuid::new(),
             symbol,
             token,
             created_timestamp: Utc::now().to_string(),

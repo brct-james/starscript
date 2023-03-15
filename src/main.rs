@@ -18,6 +18,8 @@ use http::status::StatusCode;
 
 use chrono::prelude::Utc;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 // API
 use spacedust::apis::agents_api::get_my_agent;
 use spacedust::apis::default_api::register;
@@ -38,6 +40,7 @@ mod cadet;
 use cadet::{admiral::Admiral, astropath::Astropath, factor::Factor, navigator::Navigator};
 
 mod log;
+use crate::dbqueue::{Task, TaskPriority};
 use crate::log::{Log, LogSeverity, Message};
 
 mod steward;
@@ -49,8 +52,22 @@ use identity_manager::{AgentIdentity, IdentityManager};
 mod safe_panic;
 use safe_panic::safe_panic;
 
+mod dbqueue;
+use dbqueue::DBQueue;
+
+mod rules;
+use rules::RulesManager;
+
 #[tokio::main]
 async fn main() {
+    // Setup ctrl-c handling
+    let quit = Arc::new(AtomicBool::new(false));
+    let q = quit.clone();
+    ctrlc::set_handler(move || {
+        q.store(true, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
     // Get Mongo Creds from Env
     dotenv::from_filename("mongo_secrets.env").ok();
 
@@ -83,9 +100,55 @@ async fn main() {
     // Run Handle Agent Login and Registration
     let logged_in_agents = setup_identities(&client, &log_tx, &steward).await;
 
+    // Create collections for game data
+    let game_db = client.database("starscript-gamedata");
+    let gamedata_collections = get_collections(
+        game_db,
+        HashMap::from([
+            ("astronomicon".to_string(), true),
+            ("fleet".to_string(), true),
+        ]),
+    )
+    .await;
+
+    // // Create collections for settings
+    // let settings_db = client.database("starscript-settings");
+    // let settings_collections = get_collections(
+    //     settings_db,
+    //     HashMap::from([
+    //             ("staleness".to_string(), true),
+    //     ]),
+    // )
+    // .await;
+
+    // Create rules manager and get staleness rules
+    let rules_manager = RulesManager::new();
+    let staleness_rules = rules_manager.get_staleness_rules();
+
+    // Create collection for cadet queues
+    let queue_db = client.database("starscript-queues");
+    let cadet_queue_collections = get_collections(
+        queue_db,
+        HashMap::from([
+            ("admiral".to_string(), true),
+            ("astropath".to_string(), true),
+            ("factor".to_string(), true),
+            ("navigator".to_string(), true),
+            ("ensign".to_string(), true),
+        ]),
+    )
+    .await;
+
+    // Create dbqueue managers for cadets
+    let admiral_queue = DBQueue::new(cadet_queue_collections.clone(), "admiral".to_string());
+    let astropath_queue = DBQueue::new(cadet_queue_collections.clone(), "astropath".to_string());
+    let factor_queue = DBQueue::new(cadet_queue_collections.clone(), "factor".to_string());
+    let navigator_queue = DBQueue::new(cadet_queue_collections.clone(), "navigator".to_string());
+    let _ensign_queue = DBQueue::new(cadet_queue_collections.clone(), "ensign".to_string());
+
     // Create Cadets
     println!("Starting Cadet Creation");
-    for (agent_symbol, _) in logged_in_agents {
+    for (agent_symbol, agent_api_config) in logged_in_agents {
         println!("Creating Cadets for Agent {}", agent_symbol);
         // Create Cadets
         let mut navigator = Navigator::new(
@@ -93,24 +156,31 @@ async fn main() {
             agent_symbol.to_string(),
             cmd_rx.clone(),
             log_tx.clone(),
+            navigator_queue.clone(),
         );
         let mut factor = Factor::new(
             "FACTOR".to_string(),
             agent_symbol.to_string(),
             cmd_rx.clone(),
             log_tx.clone(),
+            factor_queue.clone(),
         );
         let mut astropath = Astropath::new(
             "ASTROPATH".to_string(),
             agent_symbol.to_string(),
             cmd_rx.clone(),
             log_tx.clone(),
+            astropath_queue.clone(),
+            agent_api_config.clone(),
+            gamedata_collections.clone(),
+            staleness_rules.clone(),
         );
         let mut admiral = Admiral::new(
             "ADMIRAL".to_string(),
             agent_symbol.to_string(),
             cmd_rx.clone(),
             log_tx.clone(),
+            admiral_queue.clone(),
         );
 
         // Mark each cadet as STARTING in process_status
@@ -190,6 +260,47 @@ async fn main() {
     }
 
     println!("All Non-Ensign Cadets Created");
+
+    println!("Enqueing DB Refresh from API");
+    astropath_queue
+        .send_task(Task::new(
+            TaskPriority::ASAP,
+            "refresh_systems".to_string(),
+            HashMap::new(),
+            None,
+        ))
+        .await;
+    astropath_queue
+        .send_task(Task::new(
+            TaskPriority::ASAP,
+            "refresh_fleet".to_string(),
+            HashMap::new(),
+            None,
+        ))
+        .await;
+    astropath_queue
+        .send_task(Task::new(
+            TaskPriority::ASAP,
+            "refresh_fleet".to_string(),
+            HashMap::new(),
+            None,
+        ))
+        .await;
+
+    println!("Initialization Finished, Entering Game Loop, Hit Ctrl+C to exit");
+    loop {
+        // println!("------- At Beginning of Loop -------");
+        // CHECK IF NEED TO QUIT AND IF SO GRACEFULLY SHUTDOWN
+        if quit.load(Ordering::SeqCst) {
+            // cmd_tx.send("shutdown".to_string()).unwrap();
+            // // Sleep to allow the processes to gracefully shutdown before killing process
+            // // TODO: Use a channel to confirm shutdown instead
+            // sleep(Duration::from_millis(5000)).await;
+            break;
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+
     safe_panic("Finished Main".to_string(), &steward).await;
 }
 

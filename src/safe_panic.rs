@@ -24,6 +24,11 @@ pub async fn safe_panic(panic: String, steward: &Steward) {
         if processes_remaining.len() == 0 {
             processes_remain = false;
         }
+        if Utc::now()
+        .signed_duration_since(shutdown_timestamp)
+        .num_seconds() >= 30 {
+            panic!("MAX WAIT ELAPSED, FORCING PANIC:\n{}", panic);
+        }
         sleep(Duration::from_millis(1000)).await;
     }
     sleep(Duration::from_millis(1000)).await;

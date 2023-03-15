@@ -15,11 +15,15 @@ tokio = { version = "1.23", features = ["full"] }
 spacedust = "1.0.1"
 flume = "0.10.12"
 ctrlc = "3.2.1"
-chrono = "0.4.19"
 log = "0.4.17"
 dotenv = "0.15.0"
 http = "0.2.9"
 futures = "0.3.26"
+[dependencies.chrono]
+version = "0.4.23"
+[dependencies.bson]
+version = "2.5.0"
+features = ["chrono-0_4"]
 [dependencies.mongodb]
 version = "2.3.1"
 default-features = false

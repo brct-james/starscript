@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 use chrono::prelude::Utc;
 use futures::FutureExt;
-use mongodb::bson::{doc, to_document};
-use mongodb::{bson::Document, Collection};
+use mongodb::bson::{doc, to_document, DateTime, Document};
+use mongodb::Collection;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc::Receiver as MPSCReceiver;
 use tokio::sync::watch::Receiver as SPMCReceiver;
@@ -11,9 +11,10 @@ use tokio::sync::watch::Receiver as SPMCReceiver;
 use crate::safe_panic::safe_panic;
 use crate::steward::{ProcessState, Steward};
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ProcessStatus {
-    pub last_update_timestamp: String,
+    pub uuid: bson::Uuid,
+    pub last_update_timestamp: DateTime,
     pub process_id: String,
     pub state: String,
 }
@@ -21,7 +22,8 @@ pub struct ProcessStatus {
 impl ProcessStatus {
     pub fn new(process_id: String, state: ProcessState) -> Self {
         Self {
-            last_update_timestamp: Utc::now().to_string(),
+            uuid: bson::Uuid::new(),
+            last_update_timestamp: Utc::now().into(),
             process_id,
             state: state.to_string(),
         }
