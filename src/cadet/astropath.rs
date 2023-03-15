@@ -178,33 +178,51 @@ impl Astropath {
                 .await
                 .unwrap();
 
-            let mut success: bool = false;
-            // can probably just return instead of using success bool...
             // TODO: Once systems.json PR is merged, push update to cargo, then use it here
             sleep(Duration::from_millis(1000)).await;
-            success = true;
-            if success {
-                self.refresh_timestamps.insert(
-                    rule_name,
-                    DateTime::from_millis(Utc::now().timestamp_millis()),
-                );
-                self.queue.finish_task(task).await;
-            } else {
-                // TODO: Handle instead of panic
-                safe_panic(
-                    "Could not refresh_systems, see priority log for more details".to_string(),
-                    &steward,
-                )
-                .await;
-            }
+            // // TODO: Handle instead of panic
+            // safe_panic(
+            //     "Could not refresh_systems, see priority log for more details".to_string(),
+            //     &steward,
+            // )
+            // .await;
+
+            // SUCCESS
+            self.refresh_timestamps.insert(
+                rule_name,
+                DateTime::from_millis(Utc::now().timestamp_millis()),
+            );
         } else {
-            // TODO: Handle instead of panic
-            safe_panic(
-                "No need to refresh systems because data not stale".to_string(),
-                &steward,
-            )
-            .await;
+            self.log_tx
+                .send(Message::new(
+                    LogSeverity::Routine,
+                    process_id.to_string(),
+                    format!("REFRESH_SYSTEMS: No need to refresh systems because data not stale",),
+                ))
+                .await
+                .unwrap();
         }
+        match &task.callback {
+            Some(builder) => {
+                let cb_task = builder.build();
+                self.queue
+                    .send_task_any_queue(builder.get_queue_name(), cb_task)
+                    .await;
+                self.log_tx
+                    .send(Message::new(
+                        LogSeverity::Routine,
+                        process_id.to_string(),
+                        format!(
+                            "REFRESH_SYSTEMS: Queued callback with {}",
+                            builder.get_queue_name(),
+                        ),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            None => (),
+        }
+        self.queue.finish_task(task).await;
     }
 
     async fn refresh_fleet(&mut self, process_id: String, task: Task, steward: &Steward) {
@@ -326,20 +344,42 @@ impl Astropath {
                 .await
                 .unwrap();
 
-            // SUCCESS - Finish task
+            // SUCCESS
             self.refresh_timestamps.insert(
                 rule_name,
                 DateTime::from_millis(Utc::now().timestamp_millis()),
             );
-            self.queue.finish_task(task).await;
         } else {
-            // TODO: Handle instead of panic
-            safe_panic(
-                "No need to refresh fleet because data not stale".to_string(),
-                &steward,
-            )
-            .await;
+            self.log_tx
+                .send(Message::new(
+                    LogSeverity::Routine,
+                    process_id.to_string(),
+                    format!("REFRESH_FLEET: No need to refresh fleet because data not stale",),
+                ))
+                .await
+                .unwrap();
         }
+        match &task.callback {
+            Some(builder) => {
+                let cb_task = builder.build();
+                self.queue
+                    .send_task_any_queue(builder.get_queue_name(), cb_task)
+                    .await;
+                self.log_tx
+                    .send(Message::new(
+                        LogSeverity::Routine,
+                        process_id.to_string(),
+                        format!(
+                            "REFRESH_FLEET: Queued callback with {}",
+                            builder.get_queue_name(),
+                        ),
+                    ))
+                    .await
+                    .unwrap();
+            }
+            None => (),
+        }
+        self.queue.finish_task(task).await;
     }
 }
 

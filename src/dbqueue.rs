@@ -116,11 +116,11 @@ impl CallbackTaskBuilder {
         }
     }
 
-    fn get_queue_name(&self) -> String {
+    pub fn get_queue_name(&self) -> String {
         self.queue_name.to_string()
     }
 
-    fn build(&self) -> Task {
+    pub fn build(&self) -> Task {
         Task::new(
             self.priority.clone(),
             self.command.to_string(),
