@@ -107,6 +107,8 @@ async fn main() {
         HashMap::from([
             ("astronomicon".to_string(), true),
             ("fleet".to_string(), true),
+            ("systems".to_string(), true),
+            ("surveys".to_string(), true),
         ]),
     )
     .await;
@@ -265,6 +267,7 @@ async fn main() {
     astropath_queue
         .send_task(Task::new(
             TaskPriority::ASAP,
+            None,
             "refresh_systems".to_string(),
             HashMap::new(),
             None,
@@ -273,6 +276,7 @@ async fn main() {
     astropath_queue
         .send_task(Task::new(
             TaskPriority::ASAP,
+            None,
             "refresh_fleet".to_string(),
             HashMap::new(),
             None,
@@ -281,8 +285,19 @@ async fn main() {
     astropath_queue
         .send_task(Task::new(
             TaskPriority::ASAP,
+            None,
             "refresh_fleet".to_string(),
             HashMap::new(),
+            None,
+        ))
+        .await;
+
+    astropath_queue
+        .send_task(Task::new(
+            TaskPriority::ASAP,
+            None,
+            "survey".to_string(),
+            HashMap::from([("ship_symbol".to_string(), "NEWAGENT-1".to_string())]),
             None,
         ))
         .await;
@@ -317,7 +332,7 @@ async fn setup_identities(
     // identity_collections.get("agents").unwrap().clone()
     let identity_manager =
         IdentityManager::new(identity_collections.get("agents").unwrap().clone());
-    identity_manager.save_agent("test144121".to_string(), "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZGVudGlmaWVyIjoiVEVTVDE0NDEyMSIsImlhdCI6MTY3NzM1MzkzNywic3ViIjoiYWdlbnQtdG9rZW4ifQ.sKH_plunZQl8qbu_wR1a65beysxCpYrHwmZwXadlT9rzkHhxXcDf7WczbOFHjD9mjas88lL2k_BJWJ5GCfn3HAoQCTIjHA3IbSh7ugHptjVBByRFSRzV2yddTZgFKKgc7nD7128w23w7t2mYAZ9q-1m8fSwMqrKPP7_RgDMtrt6nOW3VHyS5aPSssiu8bsdDqMzUAkEwy1N2SYVZTIOQL6IEq5OYljY9QONy2isXkJSGvWlFGNlZH6WQAYQeXKc5fvIUv5rG4hH0oGjeb6ncnyZUQjEmIlDGoRWsiXWgUS0iHkg3w_JwEOeRgTYs0nD2AUZrR-Yd_cpN_DOCJXyX_uns-ksMU-FVw7cam75274XfI89rPJOAtg0wLIkdGWzVvxir0Nv0tL9Uq7UpzvJEDFWcV9TpOqn046-XCS8Hktv1_S9sXQ--yJQlNmqlC9FSAhzK3h4VXKoISxYwLuTSlqSw90uY0Zdfu-Fv3nerTsS3ayp6JqvhCCfP70FenuWZ".to_string()).await;
+    identity_manager.save_agent("newagent".to_string(), "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZGVudGlmaWVyIjoiTkVXQUdFTlQiLCJpYXQiOjE2Nzg5ODY4ODQsInN1YiI6ImFnZW50LXRva2VuIn0.n8pReugXLswIzrc9ufft6zWqhebVg2JbkbT3sjUVHRZk91C7px_V5lpnd1TLJBRJPZSXylonbOloifksXB6MmT7Vwf3-v8bM4FmXX5hpC_n5BwjYgXAqmZovo73H6KbfJiyaviRe5bVsr3grz773q1l5cT5o-TJ8F3KSNdsmuqS2eIwtU8tAI3Hfbmn60S1V0c8n5MuhHKKBZ7odPs9zCkxSuX3x2_vlBsnXA26VZ1NXYTHK1cALxenLVpJBiy5-NpfETBL8k707V9HIaREyJeYxMhp7bGozkJvlGKi1yTP6vFZWcoAq3-ufvNqJdXXvx8XFyujzHNJV3WMHdqfgfO5f8eF7WZP0NjrxV1FaFvsV3viVTzj8uTXyabwPvupVwNoM0SLMP7LdVb2q7pMPgQPSBglqcQLOYo0e23ISUhko_YJie4Qapqxq3dpWVFvagWFvuNvP3cPojATw3kz1vlgmUfpKdPJ4iMLIFoN_9tRaQ45hxpo3PGcLhRrXoSGt".to_string()).await;
 
     // Look for agents.json defining symbols to load
     let agent_symbols: Vec<String>;
@@ -560,7 +575,7 @@ impl AgentsJSON {
 }
 
 fn load_agents_json() -> Result<AgentsJSON, std::io::Error> {
-    let filename = "json/agents.json";
+    let filename = "json/settings/agents.json";
     let f = std::fs::OpenOptions::new()
         .write(true)
         .create(true)

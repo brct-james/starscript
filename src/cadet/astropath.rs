@@ -11,9 +11,10 @@ use mongodb::bson::DateTime;
 use mongodb::options::ReplaceOptions;
 use mongodb::Collection;
 use serde::{Deserialize, Serialize};
-use spacedust::apis::fleet_api::get_my_ships;
+use spacedust::apis::fleet_api::{create_survey, get_my_ships};
+use spacedust::apis::systems_api::get_systems_all;
 use spacedust::apis::Error::ResponseError;
-use spacedust::models::Ship;
+use spacedust::models::{Cooldown, Ship, Survey, System};
 use std::collections::HashMap;
 use tokio::sync::mpsc::Sender as MPSCSender;
 use tokio::sync::watch::Receiver as SPMCReceiver;
@@ -29,6 +30,7 @@ pub struct Astropath {
     api_config: spacedust::apis::configuration::Configuration,
     data_tables: HashMap<String, Collection<Document>>,
     staleness_rules: StalenessRules,
+    cooldowns: HashMap<String, HashMap<String, DateTime>>,
     refresh_timestamps: HashMap<String, DateTime>,
 }
 
@@ -53,6 +55,7 @@ impl Astropath {
             api_config,
             data_tables,
             staleness_rules,
+            cooldowns: HashMap::<String, HashMap<String, DateTime>>::new(),
             refresh_timestamps: HashMap::<String, DateTime>::new(),
         }
     }
@@ -84,6 +87,8 @@ impl Astropath {
                                 self.refresh_systems(process_id.to_string(), task, &steward).await;
                             } else if task_cmd == String::from("refresh_fleet") {
                                 self.refresh_fleet(process_id.to_string(), task, &steward).await;
+                            } else if task_cmd == String::from("survey") {
+                                self.conduct_survey(process_id.to_string(), task, &steward).await;
                             } else {
                                 self.log_tx.send(Message::new(LogSeverity::Critical, process_id.to_string(), format!("Received unhandled task command: {}", task_cmd))).await.unwrap();
                                 safe_panic(format!("Received unhandled task command: {}", task_cmd), &steward).await;
@@ -178,14 +183,96 @@ impl Astropath {
                 .await
                 .unwrap();
 
-            // TODO: Once systems.json PR is merged, push update to cargo, then use it here
-            sleep(Duration::from_millis(1000)).await;
-            // // TODO: Handle instead of panic
-            // safe_panic(
-            //     "Could not refresh_systems, see priority log for more details".to_string(),
-            //     &steward,
-            // )
-            // .await;
+            let mut systems = HashMap::<String, System>::new();
+            loop {
+                match get_systems_all(&self.api_config).await {
+                    Ok(response) => {
+                        for sys in response {
+                            systems.insert(sys.symbol.to_string(), sys);
+                        }
+                        break;
+                    }
+                    Err(ResponseError(e)) => match e.status {
+                        StatusCode::TOO_MANY_REQUESTS => {
+                            // TODO: Make a PR in the docs repo to generate error handling for ratelimit and other error codes instead of rolling my own ratelimit error object
+                            println!("rl_Content: {:#?}", &e.content);
+                            let rl_err: RatelimitErrorWrapper =
+                                serde_json::from_str(&e.content).unwrap();
+                            sleep(Duration::from_millis(rl_err.get_retry_after_millis() + 1)).await;
+                        }
+                        _ => {
+                            self.log_tx
+                                .send(Message::new(
+                                    LogSeverity::Priority,
+                                    "ASTROPATH".to_string(),
+                                    format!("REFRESH_SYSTEMS: Failed to get_systems_all, ResponseError, reason {:?}", e),
+                                ))
+                                .await
+                                .unwrap();
+                            safe_panic(
+                                "Could not refresh_systems, see priority log for more details"
+                                    .to_string(),
+                                &steward,
+                            )
+                            .await;
+                            return;
+                        }
+                    },
+                    Err(e) => {
+                        self.log_tx
+                            .send(Message::new(
+                                LogSeverity::Priority,
+                                "ASTROPATH".to_string(),
+                                format!(
+                                    "REFRESH_SYSTEMS: Failed to get_systems_all, reason {:?}",
+                                    e
+                                ),
+                            ))
+                            .await
+                            .unwrap();
+                        safe_panic(
+                            "Could not refresh_systems, see priority log for more details"
+                                .to_string(),
+                            &steward,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+
+            self.log_tx
+                .send(Message::new(
+                    LogSeverity::Routine,
+                    process_id.to_string(),
+                    format!("REFRESH_SYSTEMS: Received All Systems from API, Storing..."),
+                ))
+                .await
+                .unwrap();
+
+            let systems_table = self.data_tables.get("systems").unwrap();
+            for (system_symbol, system) in systems.iter() {
+                systems_table
+                    .replace_one(
+                        doc! {"symbol": system_symbol.to_string()},
+                        to_document(&system).unwrap(),
+                        Some(ReplaceOptions::builder().upsert(true).build()),
+                    )
+                    .await
+                    .unwrap();
+            }
+
+            self.log_tx
+                .send(Message::new(
+                    LogSeverity::Routine,
+                    process_id.to_string(),
+                    format!(
+                        "REFRESH_SYSTEMS: Finished storing systems, total stored: {}",
+                        systems.len()
+                    ),
+                ))
+                .await
+                .unwrap();
 
             // SUCCESS
             self.refresh_timestamps.insert(
@@ -201,26 +288,6 @@ impl Astropath {
                 ))
                 .await
                 .unwrap();
-        }
-        match &task.callback {
-            Some(builder) => {
-                let cb_task = builder.build();
-                self.queue
-                    .send_task_any_queue(builder.get_queue_name(), cb_task)
-                    .await;
-                self.log_tx
-                    .send(Message::new(
-                        LogSeverity::Routine,
-                        process_id.to_string(),
-                        format!(
-                            "REFRESH_SYSTEMS: Queued callback with {}",
-                            builder.get_queue_name(),
-                        ),
-                    ))
-                    .await
-                    .unwrap();
-            }
-            None => (),
         }
         self.queue.finish_task(task).await;
     }
@@ -359,26 +426,131 @@ impl Astropath {
                 .await
                 .unwrap();
         }
-        match &task.callback {
-            Some(builder) => {
-                let cb_task = builder.build();
-                self.queue
-                    .send_task_any_queue(builder.get_queue_name(), cb_task)
-                    .await;
+        self.queue.finish_task(task).await;
+    }
+
+    async fn conduct_survey(&mut self, process_id: String, task: Task, steward: &Steward) {
+        let cooldown_category = "SURVEY".to_string();
+        let ship_symbol_option = task.parameters.get("ship_symbol");
+
+        let ship_symbol: String;
+        match ship_symbol_option {
+            Some(ss) => ship_symbol = ss.to_string(),
+            None => {
                 self.log_tx
                     .send(Message::new(
-                        LogSeverity::Routine,
+                        LogSeverity::Critical,
                         process_id.to_string(),
                         format!(
-                            "REFRESH_FLEET: Queued callback with {}",
-                            builder.get_queue_name(),
+                            "CONDUCT_SURVEY: Received nonsensical request, could not get ship_symbol from parameters hashmap!",
                         ),
                     ))
                     .await
                     .unwrap();
+                self.queue.finish_task(task).await;
+                return;
             }
-            None => (),
         }
+
+        let ccat = self
+            .cooldowns
+            .entry(cooldown_category)
+            .or_insert(HashMap::<String, DateTime>::new());
+        let cooldown_expiration = ccat
+            .entry(ship_symbol.to_string())
+            .or_insert(DateTime::from_millis(0))
+            .timestamp_millis();
+
+        let time_till_cd_expired = cooldown_expiration - Utc::now().timestamp_millis();
+
+        if 0 < time_till_cd_expired && time_till_cd_expired <= 50 {
+            // Too early to conduct survey, but not too long, sleep then handle
+            sleep(Duration::from_millis((time_till_cd_expired + 1) as u64)).await;
+        } else if time_till_cd_expired > 50 {
+            // Too early to conduct survey, deprioritize task in queue
+            self.queue
+                .update_task_run_after(task, DateTime::from_millis(time_till_cd_expired))
+                .await;
+            // Return without finishing task to keep the task in queue just with a new run_after timestamp that matches the cooldown
+            return;
+        }
+
+        // Not on Cooldown, Conduct Survey:
+        let mut surveys: Vec<Survey> = Default::default();
+        let cooldown: Cooldown;
+        loop {
+            println!("SURV: {}", ship_symbol);
+            match create_survey(&self.api_config, ship_symbol.as_str(), 0).await {
+                Ok(response) => {
+                    cooldown = *response.data.cooldown;
+                    surveys.extend(response.data.surveys);
+                    break;
+                }
+                Err(ResponseError(e)) => match e.status {
+                    StatusCode::TOO_MANY_REQUESTS => {
+                        // TODO: Make a PR in the docs repo to generate error handling for ratelimit and other error codes instead of rolling my own ratelimit error object
+                        println!("rl_Content: {:#?}", &e.content);
+                        let rl_err: RatelimitErrorWrapper =
+                            serde_json::from_str(&e.content).unwrap();
+                        sleep(Duration::from_millis(rl_err.get_retry_after_millis() + 1)).await;
+                    }
+                    _ => {
+                        self.log_tx
+                            .send(Message::new(
+                                LogSeverity::Priority,
+                                "ASTROPATH".to_string(),
+                                format!(
+                                    "CONDUCT_SURVEY: Failed to create_survey, ResponseError, reason {:?}",
+                                    e
+                                ),
+                            ))
+                            .await
+                            .unwrap();
+                        safe_panic(
+                            "Could not conduct_survey, see priority log for more details"
+                                .to_string(),
+                            &steward,
+                        )
+                        .await;
+                        return;
+                    }
+                },
+                Err(e) => {
+                    self.log_tx
+                        .send(Message::new(
+                            LogSeverity::Priority,
+                            "ASTROPATH".to_string(),
+                            format!("CONDUCT_SURVEY: Failed to create_survey, reason {:?}", e),
+                        ))
+                        .await
+                        .unwrap();
+                    safe_panic(
+                        "Could not conduct_survey, see priority log for more details".to_string(),
+                        &steward,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+
+        self.log_tx
+            .send(Message::new(
+                LogSeverity::Routine,
+                process_id.to_string(),
+                format!("CONDUCT_SURVEY: Received Survey Response, Storing..."),
+            ))
+            .await
+            .unwrap();
+
+        ccat.insert(
+            ship_symbol,
+            DateTime::parse_rfc3339_str(cooldown.expiration).unwrap(),
+        );
+        let survey_table = self.data_tables.get("surveys").unwrap();
+        let docs = surveys.into_iter().map(|s| to_document(&s).unwrap());
+        survey_table.insert_many(docs, None).await.unwrap();
+
         self.queue.finish_task(task).await;
     }
 }

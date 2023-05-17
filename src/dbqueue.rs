@@ -28,10 +28,19 @@ impl DBQueue {
         let queue_table = self.queue_collections.get(&self.queue_name).unwrap();
         let found_cursor = queue_table
             .find(
-                None,
+                Some(doc! {
+                    "$or": [
+                        {"only_run_after": Bson::Null},
+                        {"only_run_after":
+                            {
+                                "$lte": DateTime::now()
+                            }
+                        }
+                        ]
+                }),
                 FindOptions::builder()
                     .limit(1)
-                    .sort(doc! { "priority": 1, "timestamp": -1 })
+                    .sort(doc! { "priority": 1, "timestamp": 1 })
                     .build(),
             )
             .await
@@ -66,6 +75,19 @@ impl DBQueue {
             .await;
     }
 
+    pub async fn update_task_run_after(&self, task: Task, new_run_after_datetime: DateTime) {
+        let queue_table = self.queue_collections.get(&self.queue_name).unwrap();
+
+        queue_table
+            .update_one(
+                doc! { "uuid": task.uuid },
+                doc! { "$set": { "only_run_after": new_run_after_datetime }},
+                None,
+            )
+            .await
+            .unwrap();
+    }
+
     pub async fn send_callback(&self, builder: CallbackTaskBuilder) {
         let target = builder.get_queue_name();
         self.send_task_any_queue(target, builder.build()).await;
@@ -96,6 +118,7 @@ impl DBQueue {
 pub struct CallbackTaskBuilder {
     queue_name: String,
     priority: TaskPriority,
+    only_run_after: Option<DateTime>,
     command: String,
     parameters: HashMap<String, String>,
 }
@@ -105,12 +128,14 @@ impl CallbackTaskBuilder {
     pub fn new(
         queue_name: String,
         priority: TaskPriority,
+        only_run_after: Option<DateTime>,
         command: String,
         parameters: HashMap<String, String>,
     ) -> Self {
         Self {
             queue_name,
             priority,
+            only_run_after,
             command,
             parameters,
         }
@@ -123,6 +148,7 @@ impl CallbackTaskBuilder {
     pub fn build(&self) -> Task {
         Task::new(
             self.priority.clone(),
+            self.only_run_after.clone(),
             self.command.to_string(),
             self.parameters.clone(),
             None,
@@ -158,6 +184,7 @@ pub struct Task {
     pub uuid: bson::Uuid,
     pub priority: TaskPriority,
     pub timestamp: DateTime,
+    pub only_run_after: Option<DateTime>,
     pub command: String,
     pub parameters: HashMap<String, String>,
     pub callback: Option<CallbackTaskBuilder>,
@@ -166,6 +193,7 @@ pub struct Task {
 impl Task {
     pub fn new(
         priority: TaskPriority,
+        only_run_after: Option<DateTime>,
         command: String,
         parameters: HashMap<String, String>,
         callback: Option<CallbackTaskBuilder>,
@@ -174,6 +202,7 @@ impl Task {
             uuid: bson::Uuid::new(),
             priority,
             timestamp: Utc::now().into(),
+            only_run_after,
             command,
             parameters,
             callback,

@@ -27,7 +27,7 @@ pub async fn safe_panic(panic: String, steward: &Steward) {
         if Utc::now()
             .signed_duration_since(shutdown_timestamp)
             .num_seconds()
-            >= 30
+            >= 10
         {
             panic!("MAX WAIT ELAPSED, FORCING PANIC:\n{}", panic);
         }
