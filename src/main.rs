@@ -4,10 +4,11 @@ use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt};
 // use crate::models::Tabled;
 
 // mod controllers;
-// mod models;
+mod models;
 // mod response;
 // mod utils;
-// mod yaml_util;
+mod types;
+mod yaml_util;
 
 #[tokio::main]
 async fn main() {
@@ -20,7 +21,7 @@ async fn main() {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::debug!("--Intializing Server--");
+    tracing::debug!("--Intializing Starscript--");
 
     let pool = PgPoolOptions::new()
         .max_connections(5)
@@ -82,10 +83,16 @@ async fn main() {
         }
     }
 
-    tracing::debug!("--Populating Database--");
+    tracing::debug!("--Loading Rules--");
 
-    // yaml_util::load_yaml_to_db(&pool).await;
+    let staleness_rules: types::StalenessRules = yaml_util::load_staleness_rules();
 
     // run our app
     tracing::debug!("--==Starscript Ready==--");
+
+    // Check if Agent in DB else goto register
+    // Attempt to get agent details using saved token
+    // If fail, attempt register
+    // If fail register, panic
+    // Update the rest of the state at startup based on staleness rules from YAML
 }

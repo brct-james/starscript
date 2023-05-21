@@ -1,0 +1,2 @@
+- name: agent
+  seconds_till_stale: 3600
