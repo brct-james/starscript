@@ -1,0 +1,5 @@
+---
+- name: agent
+  seconds_till_stale: 3600
+- name: profit_rule_example
+  min_profit_per_call: 0
