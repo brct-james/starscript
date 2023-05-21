@@ -1,91 +1,84 @@
-use sqlx::postgres::PgPoolOptions;
-use tracing_subscriber::{self, layer::SubscriberExt, util::SubscriberInitExt};
+use dotenv;
+use serde::{Deserialize, Serialize};
+use surrealdb::engine::remote::ws::Ws;
+use surrealdb::opt::auth::Root;
+use surrealdb::sql::Thing;
+use surrealdb::Surreal;
 
-// use crate::models::Tabled;
+#[derive(Debug, Serialize)]
+struct Name<'a> {
+    first: &'a str,
+    last: &'a str,
+}
 
-// mod controllers;
-// mod models;
-// mod response;
-// mod utils;
-// mod yaml_util;
+#[derive(Debug, Serialize)]
+struct Person<'a> {
+    title: &'a str,
+    name: Name<'a>,
+    marketing: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct Responsibility {
+    marketing: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct Record {
+    #[allow(dead_code)]
+    id: Thing,
+}
 
 #[tokio::main]
-async fn main() {
-    let durl = std::env::var("DATABASE_URL").expect("set DATABASE_URL env variable");
-    // initialize tracing
-    tracing_subscriber::registry()
-        .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "starscript=debug".into()),
-        ))
-        .with(tracing_subscriber::fmt::layer())
-        .init();
+async fn main() -> surrealdb::Result<()> {
+    // Load env files
+    dotenv::from_filename("surreal_secrets.env").ok();
+    let surreal_user = std::env::var("SURREAL_USER").expect("SURREAL_USER must be set");
+    let surreal_pass = std::env::var("SURREAL_PASS").expect("SURREAL_PASS must be set");
+    // Connect to the server
+    let db = Surreal::new::<Ws>("localhost:8000").await?;
 
-    tracing::debug!("--Intializing Server--");
+    // Signin as a namespace, database, or root user
+    db.signin(Root {
+        username: surreal_user.as_str(),
+        password: surreal_pass.as_str(),
+    })
+    .await?;
 
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&durl)
-        .await
-        .expect("unable to connect to database");
+    // Select a specific namespace / database
+    db.use_ns("test").use_db("test").await?;
 
-    tracing::debug!("--Intializing Database--");
+    // Create a new person with a random id
+    let created: Record = db
+        .create("person")
+        .content(Person {
+            title: "Founder & CEO",
+            name: Name {
+                first: "Tobie",
+                last: "Morgan Hitchcock",
+            },
+            marketing: true,
+        })
+        .await?;
+    dbg!(created);
 
-    let drop_strings: Vec<Vec<String>> = vec![
-        // models::syndicate::Syndicate::get_drop_strings(),
-        // models::user::User::get_drop_strings(),
-        // models::world::World::get_drop_strings(),
-        // models::fractal::Fractal::get_drop_strings(),
-        // models::shattere::Shattere::get_drop_strings(),
-        // models::region::Region::get_drop_strings(),
-        // models::location::Location::get_drop_strings(),
-        // models::connection::Connection::get_drop_strings(),
-        // models::npc::NPC::get_drop_strings(),
-        // models::ship::Ship::get_drop_strings(),
-        // models::commodity::Commodity::get_drop_strings(),
-        // models::factory::Factory::get_drop_strings(),
-        // models::inventory::FactoryInventory::get_drop_strings(),
-        // models::commodity_order::CommodityOrder::get_drop_strings(),
-        // models::recipe::Recipe::get_drop_strings(),
-        // models::building::Building::get_drop_strings(),
-        // models::crafting_order::CraftingOrder::get_drop_strings(),
-    ];
-    for dsv in drop_strings {
-        for ds in dsv {
-            tracing::debug!("{}", ds);
-            sqlx::query(&ds).execute(&pool).await.unwrap();
-        }
-    }
+    // Update a person record with a specific id
+    let updated: Record = db
+        .update(("person", "jaime"))
+        .merge(Responsibility { marketing: true })
+        .await?;
+    dbg!(updated);
 
-    let create_strings: Vec<Vec<String>> = vec![
-        // models::syndicate::Syndicate::get_create_strings(),
-        // models::user::User::get_create_strings(),
-        // models::world::World::get_create_strings(),
-        // models::fractal::Fractal::get_create_strings(),
-        // models::shattere::Shattere::get_create_strings(),
-        // models::region::Region::get_create_strings(),
-        // models::location::Location::get_create_strings(),
-        // models::connection::Connection::get_create_strings(),
-        // models::npc::NPC::get_create_strings(),
-        // models::ship::Ship::get_create_strings(),
-        // models::commodity::Commodity::get_create_strings(),
-        // models::factory::Factory::get_create_strings(),
-        // models::inventory::FactoryInventory::get_create_strings(),
-        // models::commodity_order::CommodityOrder::get_create_strings(),
-        // models::recipe::Recipe::get_create_strings(),
-        // models::building::Building::get_create_strings(),
-        // models::crafting_order::CraftingOrder::get_create_strings(),
-    ];
-    for tsv in create_strings {
-        for ts in tsv {
-            tracing::debug!("{}", ts);
-            sqlx::query(&ts).execute(&pool).await.unwrap();
-        }
-    }
+    // Select all people records
+    let people: Vec<Record> = db.select("person").await?;
+    dbg!(people);
 
-    tracing::debug!("--Populating Database--");
+    // Perform a custom advanced query
+    let groups = db
+        .query("SELECT marketing, count() FROM type::table($table) GROUP BY marketing")
+        .bind(("table", "person"))
+        .await?;
+    dbg!(groups);
 
-    // yaml_util::load_yaml_to_db(&pool).await;
-
-    // run our app
-    tracing::debug!("--==Starscript Ready==--");
+    Ok(())
 }

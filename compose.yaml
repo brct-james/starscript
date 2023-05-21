@@ -2,19 +2,14 @@ version: "3.8"
 
 services:
   db:
-    image: postgres:15.2-alpine
+    image: surrealdb/surrealdb:latest
     restart: always
-    env_file: postgres_secrets.env
     ports:
-      - "5433:5432"
+      - "8000:8000"
     volumes:
-      - db:/var/lib/postgresql/data
-  pgadmin:
-    image: dpage/pgadmin4
-    restart: always
-    env_file: postgres_secrets.env
-    ports:
-      - "6060:80"
+      - db:/sdb_data
+    command: start --user ${SURREAL_USER} --pass ${SURREAL_PASS} file:sdb_data/database.db
+    env_file: surreal_secrets.env
 volumes:
   db:
     driver: local

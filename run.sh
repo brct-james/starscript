@@ -1,4 +1,4 @@
 clear
-docker compose up -d --remove-orphans
+source surreal_secrets.env; docker compose up -d --remove-orphans --build
 cargo fmt
-DATABASE_URL="postgresql://starscript:fj923ofl23dj89129@localhost:5433/starscript" cargo run
+cargo run

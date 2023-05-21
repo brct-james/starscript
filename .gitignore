@@ -13,5 +13,5 @@ Cargo.lock
 *.json
 
 # Secrets
-postgres_secrets.env
+surreal_secrets.env
 planning.md
